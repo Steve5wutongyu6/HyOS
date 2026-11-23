@@ -1,0 +1,18 @@
+[package]
+name = "hyproto"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "HyOS 密码学核心：HKDF/KEK、AES-256-GCM、Ed25519、双槽头、manifest、信封"
+
+[dependencies]
+sha2 = "0.10"
+hmac = "0.12"
+hkdf = "0.12"
+aes-gcm = "0.10"
+ed25519-dalek = "2"
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = "1"
+
+[dev-dependencies]
+hex = "0.4"

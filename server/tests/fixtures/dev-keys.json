@@ -1,0 +1,14 @@
+{
+  "did": "devabd81e9fd2",
+  "srv_pub_raw_hex": "43ddcb0bdf5bda8eded1a316ab5541e4e134846f8b982dfc46970b6b69eeec09",
+  "srv_seed_hex": "697f168272632c9130604f7f68450703d59c0fb99041482c96dd8412b5ea802f",
+  "tk_master": "3b5393cbf7dffdc04ec1d1dbaa41201eaa2dfa8aa8e82f6c7d1761197a2f14f4",
+  "wk0_root": "e43ce26308e49a34f82bc25a4be698bf03f3ea82ba6a0f00ca8f5eb316b0356f",
+  "wk1_root": "8ab3f0dbc3a3dc458a74b478c24e14ebfd683e60b249620d1136752016f4ef78",
+  "dek_sys": "0d4278a2b3b7d19c5ca882c6cfecc19764d650945fb97e32917235c393279712",
+  "dek_app": "c1184717c290ec8b396a7fa6062ddccc2b22bc6c54c2b32d10145066292fbfd7",
+  "ci_token": "dev-ci-token",
+  "owner_token": "dev-owner-token",
+  "dk_priv_pkcs8_hex": "302e020100300506032b6570042204207e4f05b7300be9b588d262bce5f1624523483f1d9bb07b6918c10dd6883e893e",
+  "dk_pub_hex": "31e9bef7398c67454e1646078d0355fcbb251b2921599cd2f1dd199e523a86b8"
+}

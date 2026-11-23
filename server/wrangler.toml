@@ -1,0 +1,11 @@
+name = "hyos-keyserver"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hyos"
+database_id = "local-dev-placeholder"
+
+[vars]
+# 生产环境经 wrangler secret 注入：CI_TOKEN / OWNER_TOKEN / SRV_SK_PKCS8

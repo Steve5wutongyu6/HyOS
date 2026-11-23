@@ -1,0 +1,31 @@
+# 构建产物
+build/
+target/
+node_modules/
+.wrangler/
+dist/
+*.img
+*.qcow2
+*.iso
+*.o
+*.mod
+*.module
+
+# 本地机密（绝不入库）
+server/.dev.vars
+tests/fixtures/dev-keys.json
+*.pem
+*.key
+id_rsa*
+secrets*
+
+# 编辑器/系统
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# 运行日志与临时文件
+*.log
+probe-cache.txt
+testfile*

@@ -1,0 +1,3 @@
+CI_TOKEN=dev-ci-token
+OWNER_TOKEN=dev-owner-token
+SRV_SK_PKCS8=<hex of PKCS8 Ed25519 seed — 由 scripts/gen-dev-keys.mjs 生成>

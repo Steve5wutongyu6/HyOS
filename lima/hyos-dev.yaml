@@ -1,0 +1,47 @@
+# HyOS 联调开发机（aarch64 Debian 13，原生速度构建；x86 产物交叉编译；引导测试用 qemu-system-x86_64 TCG）
+vmType: qemu
+arch: aarch64
+cpus: 6
+memory: 8GiB
+disk: 60GiB
+
+images:
+  - location: https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-arm64.qcow2
+    arch: aarch64
+  - location: https://cloud.debian.org/images/cloud/trie/latest/debian-13-generic-arm64.qcow2
+    arch: aarch64
+    # 回退：bookworm（Debian 12）
+  - location: https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-arm64.qcow2
+    arch: aarch64
+
+mounts:
+  - location: "/Users/steve5wutongyu6/Desktop/Project/VMISS"
+    mountPoint: "/mnt/vmiss"
+    writable: true
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y -qq \
+        build-essential git curl xz-utils zstd cpio mtools dosfstools \
+        flex bison bc libelf-dev libssl-dev dwarves python3 python3-dev \
+        gcc-i686-linux-gnu binutils-i686-linux-gnu \
+        gcc-x86-64-linux-gnu binutils-x86-64-linux-gnu libc6-dev-amd64-cross \
+        qemu-system-x86 file jq \
+        nodejs npm ca-certificates gnupg
+      # Rust（工具链与 musl 目标说明：本环境用 gnu+crt-static 产出静态 x86_64 二进制）
+      su lima -c 'curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable && rustup target add x86_64-unknown-linux-gnu'
+      # 保留系统 grub 工具（grub-mkimage/bios-setup 由源码构建产物提供，系统包仅备用）
+      apt-get install -y -qq grub-common || true
+
+probes:
+  - script: |
+      #!/bin/bash
+      uname -m && rustc --version 2>/dev/null || true
+      i686-linux-gnu-gcc --version 2>/dev/null | head -1 || true
+      x86_64-linux-gnu-gcc --version 2>/dev/null | head -1 || true
+      node --version; qemu-system-x86_64 --version | head -1
