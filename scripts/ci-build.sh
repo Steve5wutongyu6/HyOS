@@ -84,7 +84,9 @@ echo "=== 9. 上传 R2 ==="
 if [ -n "${CLOUDFLARE_API_TOKEN:-}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
   export CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID
   KEY="hyos/$(date -u +%Y%m%d)/deploy-$DID.img"
-  (cd "$WORKSPACE/server" && npx wrangler r2 object put "hyos-artifacts/$KEY" -f "$B/dist/deploy.img") \
+  # 钉住 3.114.17：runner 上 npx 会拉最新 4.x（要求 Node>=22 且 put 默认写本地模拟器，
+  # 曾导致 "上传成功" 假象——对象只进了 runner 本地 .wrangler/state）
+  (cd "$WORKSPACE/server" && npx -y wrangler@3.114.17 r2 object put "hyos-artifacts/$KEY" -f "$B/dist/deploy.img") \
     && echo "uploaded r2://hyos-artifacts/$KEY"
 else
   echo "SKIP upload（未提供 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID）"
