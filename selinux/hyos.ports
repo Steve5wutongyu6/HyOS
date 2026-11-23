@@ -1,0 +1,2 @@
+# 端口上下文
+portcon tcp 18080 gen_context(system_u:object_r:hyos_auth_port_t,s0)

@@ -1,0 +1,65 @@
+policy_module(hyos, 1.0)
+
+gen_require(`
+  type unconfined_t;
+  type kernel_t;
+  type fixed_disk_device_t;
+  type unlabeled_t;
+')
+
+type hyos_auth_port_t;
+corenet_port(hyos_auth_port_t)
+
+type hyos_app_t;
+type hyos_app_exec_t;
+type hyos_config_t;
+type hyos_tmp_t;
+type hyos_init_exec_t;    # supervisor/验证器可执行文件（tmpfs 上）
+
+domain_type(hyos_app_t)
+files_type(hyos_app_exec_t)
+files_type(hyos_config_t)
+files_type(hyos_tmp_t)
+files_type(hyos_init_exec_t)
+
+# 域转换：initramfs 的 PID1 在策略加载前被内核赋予 kernel_t；测试环境可能为 unconfined_t
+type_transition kernel_t hyos_app_exec_t:process hyos_app_t;
+allow kernel_t hyos_app_t:process transition;
+type_transition unconfined_t hyos_app_exec_t:process hyos_app_t;
+allow unconfined_t hyos_app_t:process transition;
+
+# PID1(kernel_t) 执行 supervisor（initramfs 根文件系统不可标注 → 复制到 tmpfs 后标注）
+allow kernel_t hyos_init_exec_t:file { read open execute execute_no_trans entrypoint getattr map };
+allow kernel_t hyos_app_exec_t:file { read open execute execute_no_trans entrypoint getattr map };
+
+# 入口点与目录遍历
+allow hyos_app_t hyos_app_exec_t:file { read open execute execute_no_trans entrypoint getattr map };
+allow hyos_app_t hyos_app_exec_t:dir { read open search getattr };
+allow kernel_t hyos_app_exec_t:dir { read open search getattr add_name remove_name write };
+
+# 最小能力集
+allow hyos_app_t self:process { fork sigchld signal signull getattr setcurrent };
+allow hyos_app_t self:fifo_file rw_fifo_file_perms;
+allow hyos_app_t self:unix_stream_socket create_stream_socket_perms;
+allow hyos_app_t self:netlink_route_socket r_netlink_socket_perms;
+allow hyos_app_t self:capability { net_bind_service setuid setgid dac_override };
+
+# 文件：只读配置 + 仅 tmpfs 私有区可写
+allow hyos_app_t hyos_config_t:file { read open getattr map };
+allow hyos_app_t hyos_config_t:dir { read open search getattr };
+allow hyos_app_t hyos_tmp_t:file { create read write open getattr append unlink };
+allow hyos_app_t hyos_tmp_t:dir { create read write open search add_name remove_name getattr };
+
+# 网络
+corenet_udp_bind_generic_node(hyos_app_t)
+corenet_tcp_bind_generic_node(hyos_app_t)
+allow hyos_app_t hyos_auth_port_t:tcp_socket name_bind;
+allow hyos_app_t self:udp_socket { create bind listen read write getattr };
+allow hyos_app_t self:tcp_socket { create bind listen accept read write getattr };
+corenet_tcp_connect_http_port(hyos_app_t)
+
+# 显式禁止（编译期断言）
+neverallow hyos_app_t fixed_disk_device_t:blk_file *;
+neverallow hyos_app_t self:capability { sys_admin sys_module sys_rawio sys_ptrace mknod sys_boot };
+neverallow hyos_app_t kernel_t:system module_load;
+neverallow hyos_app_t hyos_app_t:process ptrace;

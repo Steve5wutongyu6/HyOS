@@ -1,0 +1,105 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "构建变体"
+        required: false
+        default: debug
+        type: choice
+        options: [debug, prod]
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: 单元测试（密码学 / 双槽头 / 信封）
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: proto 单元测试
+        working-directory: proto
+        run: cargo test --release
+
+  contract:
+    name: Worker 契约测试（本地 D1）
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: 安装依赖并初始化本地 D1
+        working-directory: server
+        run: |
+          npm ci || npm install
+          node ../scripts/gen-dev-keys.mjs
+          node ../scripts/gen-hykeys.mjs
+          npx wrangler d1 execute hyos --local --file schema.sql
+      - name: 启动本地 Worker 并跑契约测试
+        working-directory: server
+        run: |
+          npx wrangler dev --local --port 8787 &
+          for i in $(seq 1 60); do sleep 1; curl -sf http://127.0.0.1:8787/v1/health >/dev/null && break; done
+          KEY_SERVER=http://127.0.0.1:8787 node ../tests/contract.mjs
+
+  image:
+    name: 构建镜像（内核 / GRUB / 用户态 / SELinux / 制品上传）
+    runs-on: ubuntu-24.04
+    needs: [unit, contract]
+    steps:
+      - uses: actions/checkout@v4
+      - name: 构建依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential gcc-multilib gcc-i686-linux-gnu \
+            bison flex bc libssl-dev libelf-dev python3 python3-pip cpio gzip \
+            mtools dosfstools xorriso gawk pkg-config qemu-utils \
+            checkpolicy policycoreutils selinux-policy-dev semodule-utils \
+            autoconf automake autopoint gettext nodejs npm awscli
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: 安装 Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-unknown-linux-gnu
+      - name: 注入签名私钥（Secrets）
+        env:
+          HYOS_SIGNING_KEY: ${{ secrets.HYOS_SIGNING_KEY }}
+          HYOS_GIT_SSH_KEY_B64: ${{ secrets.HYOS_GIT_SSH_KEY_B64 }}
+          HYOS_GIT_SSH_PASSPHRASE: ${{ secrets.HYOS_GIT_SSH_PASSPHRASE }}
+        run: echo "secrets 已注入（不在日志中回显）"
+      - name: 构建
+        env:
+          HYOS_SIGNING_KEY: ${{ secrets.HYOS_SIGNING_KEY }}
+          HYOS_GIT_SSH_KEY_B64: ${{ secrets.HYOS_GIT_SSH_KEY_B64 }}
+          HYOS_GIT_SSH_PASSPHRASE: ${{ secrets.HYOS_GIT_SSH_PASSPHRASE }}
+          HYOS_CI_TOKEN: ${{ secrets.HYOS_CI_TOKEN }}
+          WORKER_URL: ${{ vars.WORKER_URL }}
+          S3_AK: ${{ secrets.S3_AK }}
+          S3_SK: ${{ secrets.S3_SK }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_REGION: ${{ secrets.S3_REGION }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+        run: bash scripts/ci-build.sh
+      - name: 上传构建产物（workflow artifact）
+        uses: actions/upload-artifact@v4
+        with:
+          name: hyos-deploy-img
+          path: |
+            build/dist/deploy.img.sha256
+            build/dist/build-info.txt
+            build/logs/*.log
+          if-no-files-found: warn

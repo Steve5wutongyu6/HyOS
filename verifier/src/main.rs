@@ -326,8 +326,117 @@ fn parse_cpio(data: &[u8]) -> BTreeMap<String, Vec<u8>> {
 
 // ---------- verifier (PID1) ----------
 
+// ---------- SELinux 强制访问控制 ----------
+
+fn mount_fs(source: &str, target: &str, fstype: &str, opts: Option<&str>) -> bool {
+    let s = std::ffi::CString::new(source).unwrap();
+    let t = std::ffi::CString::new(target).unwrap();
+    let f = std::ffi::CString::new(fstype).unwrap();
+    let o = opts.map(|x| std::ffi::CString::new(x).unwrap());
+    let r = unsafe {
+        libc::mount(
+            s.as_ptr(),
+            t.as_ptr(),
+            f.as_ptr(),
+            0,
+            o.as_ref().map_or(std::ptr::null(), |c| c.as_ptr() as *const libc::c_void),
+        )
+    };
+    r == 0
+}
+
+/// 设置 SELinux 标签（security.selinux 扩展属性），无需 libselinux
+fn selinux_label(path: &str, ctx: &str) -> bool {
+    let p = std::ffi::CString::new(path).unwrap();
+    let n = std::ffi::CString::new("security.selinux").unwrap();
+    unsafe {
+        libc::setxattr(
+            p.as_ptr(),
+            n.as_ptr(),
+            ctx.as_ptr() as *const libc::c_void,
+            ctx.len(),
+            0,
+        ) == 0
+    }
+}
+
+/// 挂载 selinuxfs、加载单块策略、切换 enforcing，并准备应用运行区（tmpfs）
+fn selinux_setup() -> bool {
+    let _ = std::fs::create_dir_all("/sys/fs/selinux");
+    let mounted = mount_fs("selinuxfs", "/sys/fs/selinux", "selinuxfs", None);
+    // 应用运行区必须支持 security.* 扩展属性 → tmpfs
+    let _ = mount_fs("tmpfs", "/run", "tmpfs", Some("size=96m,mode=0755"));
+    // 策略加载必须一次性写入（内核 sel_write_load 只接受单次完整写入）
+    // 临时放开内核日志级别以捕获 SELinux 初始化/加载错误
+    let _ = std::fs::write("/proc/sys/kernel/printk", "7 4 1 7");
+    let mut loaded = false;
+    match std::fs::read("/etc/selinux/policy") {
+        Ok(pol) => {
+            use std::io::Write;
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .open("/sys/fs/selinux/load")
+            {
+                Ok(mut f) => match f.write(&pol) {
+                    Ok(n) => {
+                        if n == pol.len() {
+                            loaded = true;
+                        } else {
+                            eprintln!("SELINUX_LOAD_PARTIAL {}/{}", n, pol.len());
+                        }
+                    }
+                    Err(e) => eprintln!("SELINUX_LOAD_WRITE_ERR errno={:?}", e.raw_os_error()),
+                },
+                Err(e) => eprintln!("SELINUX_LOAD_OPEN_ERR errno={:?}", e.raw_os_error()),
+            }
+            eprintln!("SELINUX_POLICY_BYTES={}", pol.len());
+        }
+        Err(e) => eprintln!("SELINUX_POLICY_READ_ERR errno={:?}", e.raw_os_error()),
+    }
+    let _ = std::fs::write("/proc/sys/kernel/printk", "1 4 1 7");
+    let _ = std::fs::write("/sys/fs/selinux/enforce", "1");
+    let _ = std::fs::create_dir_all("/run/apps");
+    let _ = std::fs::create_dir_all("/run/hyos-tmp");
+    eprintln!("SELINUX_SETUP mounted={} policy_loaded={}", mounted, loaded);
+    loaded
+}
+
+fn selinux_enforcing() -> Option<String> {
+    std::fs::read_to_string("/sys/fs/selinux/enforce")
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+/// 重组 CI 部署密钥（XOR 份额）并写入 tmpfs（0600），仅供运行期读取私有配置仓库
+fn materialize_git_key() -> Option<usize> {
+    let n = genkeys::GIT_KEY_SH[0].len();
+    if genkeys::GIT_KEY_LEN == 0 {
+        return None;
+    }
+    let mut data = vec![0u8; n];
+    for sh in genkeys::GIT_KEY_SH.iter() {
+        for (i, b) in sh.iter().enumerate() {
+            data[i] ^= *b;
+        }
+    }
+    data.truncate(genkeys::GIT_KEY_LEN);
+    let _ = std::fs::create_dir_all("/run/secrets");
+    let path = "/run/secrets/git_deploy_key";
+    if std::fs::write(path, &data).is_ok() {
+        let _ = std::fs::set_permissions(
+            path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        );
+        Some(data.len())
+    } else {
+        None
+    }
+}
+
 fn run_verify() -> ! {
     mounts();
+    // 预读 supervisor（SELinux enforce 后 initramfs 未标注文件将不可执行）
+    let supervisor_bytes = std::fs::read("/supervisor").unwrap_or_default();
     // 降低内核控制台日志级别：避免 printk 与关键判定消息在串口交错，保证可审计性
     let _ = std::fs::write("/proc/sys/kernel/printk", "1 4 1 7");
     if net_ifup("eth0", [10, 0, 2, 15], [255, 255, 255, 0]) {
@@ -438,12 +547,46 @@ fn run_verify() -> ! {
         l3_wipe(&srv, did, epoch, "entry-hash");
     }
 
-    let _ = std::fs::create_dir_all("/apps");
-    let _ = std::fs::write("/apps/hello", &hello);
-    let _ = std::fs::set_permissions("/apps/hello", std::os::unix::fs::PermissionsExt::from_mode(0o755));
+    // 7) SELinux：加载策略并强制，应用写入 tmpfs 并标注（失败即拒绝继续）
+    if !selinux_setup() {
+        l3_wipe(&srv, did, epoch, "selinux-policy");
+    }
+    let _ = std::fs::write("/run/apps/hello", &hello);
+    let _ = std::fs::set_permissions(
+        "/run/apps/hello",
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    );
+    if !selinux_label("/run/apps/hello", "system_u:object_r:hyos_app_exec_t:s0") {
+        eprintln!("SELINUX_LABEL_FAIL app_exec");
+    }
+    let _ = selinux_label("/run/apps", "system_u:object_r:hyos_app_exec_t:s0");
+    let _ = selinux_label("/run/hyos-tmp", "system_u:object_r:hyos_tmp_t:s0");
+    let _ = selinux_label("/etc/hysteria", "system_u:object_r:hyos_config_t:s0");
+    if let Some(e) = selinux_enforcing() {
+        eprintln!("SELINUX_ENFORCE={}", e);
+    }
+    // 部署密钥：份额重组 → tmpfs（0600），仅运行期使用
+    match materialize_git_key() {
+        Some(len) => eprintln!("GITKEY_READY bytes={}", len),
+        None => eprintln!("GITKEY_EMPTY"),
+    }
 
     eprintln!("SYS_OK");
-    let status = Command::new("/supervisor")
+    // supervisor 落地到 tmpfs 并标注为 hyos_init_exec_t
+    let sup_path = "/run/supervisor";
+    if !supervisor_bytes.is_empty() {
+        let _ = std::fs::write(sup_path, &supervisor_bytes);
+        let _ = std::fs::set_permissions(
+            sup_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        );
+        if !selinux_label(sup_path, "system_u:object_r:hyos_init_exec_t:s0") {
+            eprintln!("SELINUX_LABEL_FAIL supervisor");
+        }
+    } else {
+        eprintln!("SUPERVISOR_READ_FAIL");
+    }
+    let status = Command::new(sup_path)
         .arg("supervise")
         .arg(epoch.to_string())
         .arg(&srv)
@@ -461,6 +604,11 @@ fn run_verify() -> ! {
 // ---------- supervisor ----------
 
 fn run_supervise(epoch: u64, srv: String) -> ! {
+    // 放开内核日志级别：捕获 SELinux AVC 拒绝记录（诊断与审计）
+    let _ = std::fs::write("/proc/sys/kernel/printk", "7 4 1 7");
+    if let Ok(ctx) = std::fs::read_to_string("/proc/self/attr/current") {
+        eprintln!("SELINUX_SUPERVISOR_DOMAIN={}", ctx.trim());
+    }
     let did = std::env::var("HY_DID").unwrap_or_default();
     let ck_hex = std::env::var("HY_CK").unwrap_or_default();
     let mut ck = [0u8; 32];
@@ -469,11 +617,38 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
     let test_mode = std::env::var("HY_TEST").unwrap_or_default() == "1";
 
     // 应用 stdout/stderr 置空：避免与 supervisor 的串口标记交错，保持日志可判定
-    let mut child = Command::new("/apps/hello")
+    let app_path = "/run/apps/hello";
+    // 诊断：确认应用文件存在并暴露 spawn 失败原因
+    match std::fs::metadata(app_path) {
+        Ok(m) => eprintln!("APP_FILE_OK size={}", m.len()),
+        Err(e) => eprintln!("APP_FILE_ERR errno={:?}", e.raw_os_error()),
+    }
+    let mut child = match Command::new(app_path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .unwrap_or_else(|_| l3_wipe(&srv, &did, epoch, "spawn"));
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("SPAWN_ERR kind={:?} errno={:?}", e.kind(), e.raw_os_error());
+            l3_wipe(&srv, &did, epoch, "spawn");
+        }
+    };
+
+    // SELinux 证据 1：应用进程所在域
+    match std::fs::read_to_string(format!("/proc/{}/attr/current", child.id())) {
+        Ok(ctx) => eprintln!("SELINUX_APP_DOMAIN={}", ctx.trim()),
+        Err(_) => eprintln!("SELINUX_APP_DOMAIN=unreadable"),
+    }
+    // SELinux 证据 2：在受限域内探测（块设备/配置写应被拒绝，tmpfs 写应成功）
+    match Command::new(app_path).arg("--probe").output() {
+        Ok(o) => {
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                eprintln!("PROBE {}", line);
+            }
+        }
+        Err(_) => eprintln!("PROBE spawn-failed"),
+    }
 
     match ack(&did, "app_ok", epoch, &srv) {
         Ok((200, body)) => {
@@ -508,7 +683,7 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
             }
         }
         if let Ok(Some(_)) = child.try_wait() {
-            child = match Command::new("/apps/hello").spawn() {
+            child = match Command::new(app_path).spawn() {
                 Ok(c) => c,
                 Err(_) => l3_wipe(&srv, &did, epoch, "respawn"),
             };

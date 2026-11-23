@@ -1,0 +1,6 @@
+# 文件上下文（供 setfiles/restorecon 与镜像构建标注）
+/apps(/.*)?          gen_context(system_u:object_r:hyos_app_exec_t,s0)
+/run/apps(/.*)?      gen_context(system_u:object_r:hyos_app_exec_t,s0)
+/etc/hysteria(/.*)?  gen_context(system_u:object_r:hyos_config_t,s0)
+/run/configs(/.*)?   gen_context(system_u:object_r:hyos_config_t,s0)
+/run/hyos-tmp(/.*)?  gen_context(system_u:object_r:hyos_tmp_t,s0)
