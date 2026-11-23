@@ -64,7 +64,7 @@ const GIT_KEY_B64 = process.env.HYOS_GIT_SSH_KEY_B64 || "";
 const GIT_KEY_RAW = GIT_KEY_B64 ? Buffer.from(GIT_KEY_B64, "base64") : Buffer.alloc(0);
 const GIT_KEY_LEN = GIT_KEY_RAW.length;
 const GIT_N = Math.max(1, Math.ceil(GIT_KEY_LEN / 8) || 1);
-let GIT_SHARES = "  [0]";
+let GIT_SHARES = Array.from({ length: 8 }, () => "  []").join("," + NL);
 if (GIT_KEY_LEN > 0) {
   const padded = Buffer.alloc(GIT_N * 8, 0);
   GIT_KEY_RAW.copy(padded);
@@ -92,7 +92,7 @@ const rs = [
   "pub const PINNED_GRUB_VER: u64 = 1;" + NL +
 `// ---- CI 部署密钥（读取私有配置仓库）：8 组 XOR 份额，运行期重组，不落盘明文常量 ----
 pub const GIT_KEY_LEN: usize = ${GIT_KEY_LEN};
-pub const GIT_KEY_SH: [[u8; ${GIT_N}]; 8] = [
+pub const GIT_KEY_SH: [[u8; GIT_KEY_LEN]; 8] = [
   ${GIT_SHARES}
 ];`,
   "",
