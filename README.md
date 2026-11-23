@@ -12,7 +12,7 @@
 |---|---|
 | GRUB (S1) | 上电自校验(窗口哈希 + Ed25519 签名 + 白盒常量) → 双槽解析 → 用白盒 KEK 解槽内 wrap → AES-256-GCM 解密系统镜像入内存 → 注册 hyram 内存盘 → 引导内核 |
 | 内核/initramfs (S2) | 反向校验 GRUB(版本/镜像哈希/DK 签名钉扎) → 校验系统清单 → 解密应用包(DEK2)入 tmpfs → 校验 app.manifest |
-| 内核最小化 | allnoconfig + 白名单(851 项/0 模块)，bzImage 4.35MB：仅串口/SELinux/IPv4+网卡/块设备/ACPI/netfilter-DNAT；HID/USB/无线/文件系统等全部不编入（`scripts/kernel-minimal.config`） |
+| 内核最小化 | allnoconfig + 白名单 + EXPERT/反向断言(816 项/0 模块)，bzImage 3.86MB：仅串口/SELinux/IPv4+网卡/块设备/ACPI/netfilter-DNAT；HID/USB/无线/文件系统等全部不编入（`scripts/kernel-minimal.config`） |
 | 应用层 (S3) | 反向校验系统(rootfs 哈希 + 密钥一致性) → 短时令牌拉取私有 Git 配置(仅内存) → 按清单启动服务 |
 | SELinux (S3+) | enforcing 最小权限：应用锁定 `hyos_app_t` 域（块设备/危险能力/ptrace 编译期 neverallow），仅 `/run/hyos-tmp` 可写，配置只读；策略单块离线合成、构建期嵌入 |
 | 运行期 (S4) | 签名 ack 心跳、epoch 推进、失联即销毁 |

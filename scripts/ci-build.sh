@@ -79,14 +79,15 @@ else
   echo "SKIP enroll（未提供 WORKER_URL / HYOS_CI_TOKEN）"
 fi
 
-echo "=== 9. 上传 S3 ==="
-if [ -n "${S3_AK:-}" ] && [ -n "${S3_SK:-}" ]; then
-  export AWS_ACCESS_KEY_ID="$S3_AK" AWS_SECRET_ACCESS_KEY="$S3_SK" AWS_DEFAULT_REGION="${S3_REGION:-us-east-1}"
+echo "=== 9. 上传 R2 ==="
+# Cloudflare R2（同账号 API Token，无跨境 S3 慢链路；对象路径与原 S3 布局一致）
+if [ -n "${CLOUDFLARE_API_TOKEN:-}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+  export CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID
   KEY="hyos/$(date -u +%Y%m%d)/deploy-$DID.img"
-  aws --endpoint-url "https://${S3_ENDPOINT}" s3 cp "$B/dist/deploy.img" "s3://${S3_BUCKET}/$KEY" \
-    && echo "uploaded s3://${S3_BUCKET}/$KEY"
+  (cd "$WORKSPACE/server" && npx wrangler r2 object put "hyos-artifacts/$KEY" -f "$B/dist/deploy.img") \
+    && echo "uploaded r2://hyos-artifacts/$KEY"
 else
-  echo "SKIP upload（未提供 S3 凭据）"
+  echo "SKIP upload（未提供 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID）"
 fi
 
 echo "CI_BUILD_OK"

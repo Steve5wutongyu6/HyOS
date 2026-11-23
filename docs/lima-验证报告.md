@@ -214,3 +214,20 @@ HID/USB/Wireless/Bluetooth/声音/DRM/Framebuffer/RTC/Watchdog/Thermal/I2C/SPI/M
 | 复现 | VM 中移走 `/etc/selinux/default` 后运行脚本 → 完全复现（exit 2 / 零输出） |
 | 修复 | ① `ls` 加 `|| true` 守卫 + 缺商店时显式报错退出 1；② CI apt 增加 `selinux-policy-default`（提供基座策略，runner 与 VM 同构）；③ `expand-check=0` 写入 semanage.conf（对齐 VM，加速 semodule 合并） |
 | 验证 | 本地：有商店 `SELINUX_POLICY_OK bytes=1715650` ✓；无商店显式报错 exit 1 ✓；purge+重装包后 postinst 重建商店路径与 runner 全新装包一致 ✓ |
+
+### 9.6 二次收紧（EXPERT 陷阱与 select 链，2026-11-23 追加）
+
+| 项 | 内容 |
+|---|---|
+| 结果 | 816 项 =y（-35），bzImage **4.35 → 3.86 MB**（累计 13.4 → 3.86，3.5 倍） |
+| EXPERT 陷阱 | `EXPERT` 关闭时 VT/PPS 等符号**无提示**，`default y` 绕过 unset 静默生效（VT→select INPUT→touchscreen.o）→ 开 `CONFIG_EXPERT=y` 让 unset 行生效 |
+| select 链 ① | `WLAN`(default y) `select WIRELESS` → 需 unset **WLAN 断链头**（select 会覆盖显式 unset） |
+| select 链 ② | `PTP_1588_CLOCK` **default ETHERNET** 且 `select PPS` → 需 unset **PTP_1588_CLOCK**（e1000 不依赖它，无 select 反拉） |
+| 语法陷阱 | kconfig unset 行必须精确 `# CONFIG_X is not set`——行尾带注释文字则整行被当注释丢弃 |
+| 反向断言 | build-kernel.sh 增加 VT/INPUT/TOUCHSCREEN/PPS/WIRELESS/USB/HID/SOUND/DRM/IPV6 十项"不得为 y"校验 |
+| 回归 | contract 21/21 ✓ enforcing 引导 E2E SUCCESS ✓ 探测矩阵 ✓ |
+
+### 9.7 CI 制品分发切换 R2（2026-11-23）
+
+- S3（Bitiful cn-east-1）跨境上传慢 → 改 **Cloudflare R2**（同账号 API Token，`wrangler r2 object put`，无需 AWS 凭据；桶 `hyos-artifacts`，对象路径布局不变 `hyos/YYYYMMDD/deploy-<did>.img`）
+- roundtrip 实测 put/get/delete 全通；工作流同步移除 awscli 依赖与 S3_* Secrets 注入（GH Secrets 中的 S3_* 保留但不再使用）

@@ -44,6 +44,12 @@ for opt in PRINTK FUTEX EPOLL POSIX_TIMERS ADVISE_SYSCALLS MEMBARRIER MULTIUSER 
 done
 [ -z "$MISSING" ] || { echo "KERNEL_CONFIG_MISSING:$MISSING"; grep -E "^CONFIG_(LSM|NR_CPUS)=" .config; exit 1; }
 grep -q '^CONFIG_MODULES=y' .config && { echo "MODULES must be off"; exit 1; }
+# ---- 反向断言：这些大块组件被 default y 静默回拉时立即失败 ----
+PRESENT=""
+for opt in VT INPUT TOUCHSCREEN PPS WIRELESS USB HID SOUND DRM IPV6; do
+  grep -q "^CONFIG_$opt=y" .config && PRESENT="$PRESENT $opt"
+done
+[ -z "$PRESENT" ] || { echo "KERNEL_CONFIG_UNEXPECTED:$PRESENT（default y 残余，检查 EXPERT 与 unset 行）"; exit 1; }
 OPTCOUNT=$(grep -c '=y' .config); LINES=$(wc -l < .config); echo "KERNEL_CONFIG_OK options=$OPTCOUNT lines=$LINES"
 
 NPROC=$(nproc); make -j"$NPROC" bzImage
