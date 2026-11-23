@@ -1,11 +1,16 @@
 name = "hyos-keyserver"
 main = "src/index.ts"
 compatibility_date = "2024-09-23"
+account_id = "15de2210e69226938367616a4c48dee5"
+
+routes = [
+  { pattern = "hyos.nanachi.cloud", custom_domain = true }
+]
 
 [[d1_databases]]
 binding = "DB"
 database_name = "hyos"
-database_id = "local-dev-placeholder"
+database_id = "f0ff27aa-42bd-4470-9546-22e480d8a473"
 
 [vars]
 # 生产环境经 wrangler secret 注入：CI_TOKEN / OWNER_TOKEN / SRV_SK_PKCS8
