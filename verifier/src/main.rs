@@ -118,6 +118,161 @@ fn mounts() {
 }
 
 
+fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    let parts: Vec<Option<u8>> = s.trim().split('.').map(|p| p.parse().ok()).collect();
+    if parts.len() != 4 || parts.iter().any(|p| p.is_none()) {
+        return None;
+    }
+    let mut out = [0u8; 4];
+    for (i, p) in parts.iter().enumerate() {
+        out[i] = p.unwrap();
+    }
+    Some(out)
+}
+
+/// 获取网卡 ifindex（ioctl SIOCGIFINDEX）
+fn ifindex_of(name: &str) -> Option<u32> {
+    // sysfs 读取（SIOCGIFINDEX 在 hyinit 环境不可用）
+    let path = format!("/sys/class/net/{}/ifindex", name);
+    let s = std::fs::read_to_string(&path).ok()?;
+    s.trim().parse::<u32>().ok()
+}
+
+/// 默认路由：netlink RTM_NEWROUTE + RTNH_F_ONLINK + RTA_OIF
+/// （ioctl SIOCADDRT 路径在本内核配置下 fib_check_nh 网关查找返回 ENETUNREACH，
+///   ONLINK 分支仅要求设备 up + 地址类型检查，iproute2 等价行为）
+fn route_add_default_via(name: &str, gw: [u8; 4]) -> i32 {
+    use std::os::fd::RawFd;
+    const NLM_F_REQUEST: u16 = 0x0001;
+    const NLM_F_ACK: u16 = 0x0004;
+    const NLM_F_CREATE: u16 = 0x0400;
+    const NLM_F_EXCL: u16 = 0x0200;
+    const RTM_NEWROUTE: u16 = 24;
+    const NLMSG_ERROR: u16 = 2;
+    const RTA_DST: u16 = 1;
+    const RTA_OIF: u16 = 4;
+    const RTA_GATEWAY: u16 = 5;
+    const RTNH_F_ONLINK: u32 = 4;
+    const RT_SCOPE_UNIVERSE: u8 = 0;
+    const RT_TABLE_MAIN: u8 = 254;
+    const RTPROT_STATIC: u8 = 4;
+    const RTN_UNICAST: u8 = 1;
+
+    let ifidx = match ifindex_of(name) {
+        Some(v) => v,
+        None => return -19,
+    };
+
+    let mut msg: Vec<u8> = Vec::with_capacity(128);
+    // rtmsg（12 字节）
+    msg.extend_from_slice(&[libc::AF_INET as u8, 0, 0, 0]); // family, dst_len=0(默认), src_len, tos
+    msg.extend_from_slice(&[RT_TABLE_MAIN, RTPROT_STATIC, RT_SCOPE_UNIVERSE, RTN_UNICAST]);
+    msg.extend_from_slice(&RTNH_F_ONLINK.to_ne_bytes());
+    let rtmsg_len = msg.len();
+    // RTA_DST 0.0.0.0
+    msg.extend_from_slice(&(8u16).to_ne_bytes());
+    msg.extend_from_slice(&RTA_DST.to_ne_bytes());
+    msg.extend_from_slice(&[0, 0, 0, 0]);
+    // RTA_GATEWAY
+    msg.extend_from_slice(&(8u16).to_ne_bytes());
+    msg.extend_from_slice(&RTA_GATEWAY.to_ne_bytes());
+    msg.extend_from_slice(&gw);
+    // RTA_OIF
+    msg.extend_from_slice(&(8u16).to_ne_bytes());
+    msg.extend_from_slice(&RTA_OIF.to_ne_bytes());
+    msg.extend_from_slice(&ifidx.to_ne_bytes());
+
+    let nl_len = (16 + msg.len()) as u32;
+    let mut pkt: Vec<u8> = Vec::with_capacity(nl_len as usize);
+    pkt.extend_from_slice(&nl_len.to_ne_bytes());
+    pkt.extend_from_slice(&RTM_NEWROUTE.to_ne_bytes());
+    pkt.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL).to_ne_bytes());
+    pkt.extend_from_slice(&1u32.to_ne_bytes()); // seq
+    pkt.extend_from_slice(&0u32.to_ne_bytes()); // pid = kernel
+    pkt.extend_from_slice(&msg);
+    void_unused(rtmsg_len);
+
+    unsafe {
+        let fd: RawFd = libc::socket(libc::AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, libc::NETLINK_ROUTE);
+        if fd < 0 {
+            return -1;
+        }
+        // 绑定 netlink 源（kernel 需要? sendto kernel pid=0 即可）
+        let mut dst: libc::sockaddr_nl = std::mem::zeroed();
+        dst.nl_family = libc::AF_NETLINK as u16;
+        dst.nl_pid = 0;
+        dst.nl_groups = 0;
+        let sent = libc::sendto(
+            fd,
+            pkt.as_ptr() as *const libc::c_void,
+            pkt.len(),
+            0,
+            &dst as *const libc::sockaddr_nl as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_nl>() as u32,
+        );
+        if sent < 0 {
+            let e = *libc::__errno_location();
+            libc::close(fd);
+            return e;
+        }
+        // 读 ACK（NLMSG_ERROR）
+        let mut buf = [0u8; 256];
+        let n = libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0);
+        libc::close(fd);
+        if n < 16 {
+            return if n < 0 { *libc::__errno_location() } else { -1 };
+        }
+        let rtype = u16::from_ne_bytes([buf[4], buf[5]]);
+        if rtype != NLMSG_ERROR {
+            return -1;
+        }
+        let err = i32::from_ne_bytes([buf[16], buf[17], buf[18], buf[19]]);
+        err
+    }
+}
+
+#[allow(dead_code)]
+fn void_unused(_: usize) {}
+
+/// 默认路由：ioctl SIOCADDRT（保留作诊断对照）
+#[allow(dead_code)]
+fn route_add_default_via_ioctl(gw: [u8; 4]) -> i32 {
+    unsafe {
+        let sock = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
+        if sock < 0 {
+            return -1;
+        }
+        // rtentry 字段是 sockaddr（16 字节）；sockaddr_in 在 Linux 上同为 16 字节，可直接转换
+        fn sa(sin: libc::sockaddr_in) -> libc::sockaddr {
+            unsafe { std::mem::transmute(sin) }
+        }
+        let mut rt: libc::rtentry = std::mem::zeroed();
+        rt.rt_dst = sa(libc::sockaddr_in {
+            sin_family: libc::AF_INET as u16,
+            sin_port: 0,
+            sin_addr: libc::in_addr { s_addr: 0 },
+            sin_zero: [0; 8],
+        });
+        rt.rt_gateway = sa(libc::sockaddr_in {
+            sin_family: libc::AF_INET as u16,
+            sin_port: 0,
+            sin_addr: libc::in_addr { s_addr: u32::from_be_bytes(gw) },
+            sin_zero: [0; 8],
+        });
+        rt.rt_genmask = sa(libc::sockaddr_in {
+            sin_family: libc::AF_INET as u16,
+            sin_port: 0,
+            sin_addr: libc::in_addr { s_addr: 0 },
+            sin_zero: [0; 8],
+        });
+        rt.rt_flags = libc::RTF_UP | libc::RTF_GATEWAY;
+        let r = libc::ioctl(sock, libc::SIOCADDRT, &rt as *const libc::rtentry as *const libc::c_void);
+        let errno = *libc::__errno_location();
+        libc::close(sock);
+        if r == 0 { 0 } else { errno }
+    }
+}
+
 fn net_ifup(name: &str, ip: [u8; 4], mask: [u8; 4]) -> bool {
     unsafe {
         let sock = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
@@ -208,10 +363,16 @@ fn payload_nonce(dek: &[u8; 32]) -> [u8; 12] {
 
 fn http_post(srv: &str, path: &str, body: &str) -> Result<(u16, String), String> {
     use std::net::TcpStream;
-    let mut s = TcpStream::connect(srv).map_err(|e| e.to_string())?;
+    // srv 形如 "ip:port" 或 "ip:port@host"——@ 后为 HTTP Host 头。
+    // 经 Cloudflare 边缘 IP 直连时按 Host 路由到对应域名（hyinit 无 DNS 能力）。
+    let (conn, hosthdr) = match srv.split_once('@') {
+        Some((c, h)) => (c, h),
+        None => (srv, "hyos"),
+    };
+    let mut s = TcpStream::connect(conn).map_err(|e| e.to_string())?;
     let req = format!(
-        "POST {} HTTP/1.1\r\nHost: hyos\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
-        path, body.len(), body
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+        path, hosthdr, body.len(), body
     );
     s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
@@ -443,13 +604,31 @@ fn run_verify() -> ! {
     let supervisor_bytes = std::fs::read("/supervisor").unwrap_or_default();
     // 降低内核控制台日志级别：避免 printk 与关键判定消息在串口交错，保证可审计性
     let _ = std::fs::write("/proc/sys/kernel/printk", "1 4 1 7");
-    if net_ifup("eth0", [10, 0, 2, 15], [255, 255, 255, 0]) {
-        eprintln!("NET UP eth0 10.0.2.15/24");
+    // 目标网络参数：优先签名清单注入（一机一镜像）；缺省回落 QEMU 联调值。
+    // 清单在下方 467 行处验签——篡改网络字段会破坏签名触发销毁。
+    let mankv = parse_kv(&std::fs::read_to_string("/system.manifest").unwrap_or_default());
+    let net_ip = mankv.get("hy_net_ip").and_then(|s| parse_ipv4(s)).unwrap_or([10, 0, 2, 15]);
+    let net_mask = mankv.get("hy_net_mask").and_then(|s| parse_ipv4(s)).unwrap_or([255, 255, 255, 0]);
+    let net_gw = mankv.get("hy_net_gw").and_then(|s| parse_ipv4(s));
+    if net_ifup("eth0", net_ip, net_mask) {
+        eprintln!("NET UP eth0 {}.{}.{}.{} mask={}.{}.{}.{}", net_ip[0], net_ip[1], net_ip[2], net_ip[3], net_mask[0], net_mask[1], net_mask[2], net_mask[3]);
     } else {
         eprintln!("NET UP FAILED");
     }
+    if let Some(gw) = net_gw {
+        let gw_err = route_add_default_via("eth0", gw);
+        if gw_err == 0 {
+            eprintln!("NET GW via {}.{}.{}.{} (netlink onlink)", gw[0], gw[1], gw[2], gw[3]);
+        } else {
+            eprintln!("NET GW FAILED errno={}", gw_err);
+        }
+    }
     let cm = cmdline();
-    let srv = cm.get("hy_srv").cloned().unwrap_or_else(|| "10.0.2.2:80".into());
+    let srv = mankv
+        .get("hy_srv")
+        .or_else(|| cm.get("hy_srv"))
+        .cloned()
+        .unwrap_or_else(|| "10.0.2.2:80".into());
     let epoch: u64 = cm.get("hy_epoch").and_then(|v| v.parse().ok()).unwrap_or(0);
     let grub_ver: u64 = cm.get("hy_ver").and_then(|v| v.parse().ok()).unwrap_or(0);
     let attest = cm.get("hy_attest").cloned().unwrap_or_default();

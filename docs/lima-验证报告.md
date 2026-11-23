@@ -231,3 +231,15 @@ HID/USB/Wireless/Bluetooth/声音/DRM/Framebuffer/RTC/Watchdog/Thermal/I2C/SPI/M
 
 - S3（Bitiful cn-east-1）跨境上传慢 → 改 **Cloudflare R2**（同账号 API Token，`wrangler r2 object put`，无需 AWS 凭据；桶 `hyos-artifacts`，对象路径布局不变 `hyos/YYYYMMDD/deploy-<did>.img`）
 - roundtrip 实测 put/get/delete 全通；工作流同步移除 awscli 依赖与 S3_* Secrets 注入（GH Secrets 中的 S3_* 保留但不再使用）
+
+### 9.8 生产参数注入 + 一机一镜像（2026-11-23 追加）
+
+| 项 | 内容 |
+|---|---|
+| 目标 | DD 部署前必须解决的三个生产阻塞：网络参数硬编码（QEMU 值/无网关）、hyinit 无 DNS、一机一镜像 |
+| 注入通道 | `system.manifest`（**Ed25519 签名**）新增 `hy_net_ip/hy_net_mask/hy_net_gw/hy_srv/hy_srv_host` 字段 —— 篡改即验签失败触发销毁 |
+| hyinit 改造 | ① 网络参数从签名清单读取（缺省回落 QEMU 联调值）；② 新增 `route_add_default_via`（netlink RTM_NEWROUTE + RTNH_F_ONLINK + RTA_OIF，ifindex 取自 sysfs）；③ HTTP Host 头可配（`hy_srv=IP:PORT@域名`，CF 边缘 IP 直连按 Host 路由，hyinit 无 DNS） |
+| ioctl 路线废弃原因 | SIOCADDRT 在裁剪内核上 fib_check_nh_v4_gw 网关 fib_lookup 失败（ENETUNREACH/errno 101，非 SELinux——宿主内核同序列复现成功），netlink ONLINK 分支无此依赖 |
+| 一机一镜像 | `scripts/build-for-target.sh --name X --net-ip/--net-mask/--net-gw/--srv [--test-mode]`：全新设备密钥 → 注册生产 → 用户态/GRUB 重建（**VK/WK0 必须绑定新密钥**，跳过即销毁）→ 清单注入 → initrd/镜像 → R2 `hyos/targets/<名称>/` |
+| 验证 | 注入镜像 QEMU 引导：`NET UP 10.0.2.15/24` + `NET GW via 10.0.2.2 (netlink onlink)` + APP_OK sealed + **E2E SUCCESS**；默认路径回归：契约 21/21 + E2E SUCCESS |
+| 部署约束 | 目标机必须 BIOS 引导；一机一镜像（共享镜像第二台触发 epoch 回滚销毁）；hy_srv 用 CF 边缘 IP + Host 头（明文 HTTP 传输有中间人风险，TLS 属后续 M 项） |

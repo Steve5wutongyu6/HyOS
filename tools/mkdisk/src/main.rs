@@ -222,6 +222,30 @@ fn main() {
 ");
         body.push_str(&format!("grub_pin_img={}
 ", hex_enc(&window_sha)));
+        // 目标参数注入（一机一镜像）：网络与密钥服务地址进签名清单，防篡改
+        let getv = |name: &str| -> Option<String> {
+            args.iter().position(|a| a == name).map(|i| args[i + 1].clone())
+        };
+        if let Some(v) = getv("--net-ip") {
+            body.push_str(&format!("hy_net_ip={}
+", v));
+        }
+        if let Some(v) = getv("--net-mask") {
+            body.push_str(&format!("hy_net_mask={}
+", v));
+        }
+        if let Some(v) = getv("--net-gw") {
+            body.push_str(&format!("hy_net_gw={}
+", v));
+        }
+        if let Some(v) = getv("--srv") {
+            body.push_str(&format!("hy_srv={}
+", v));
+        }
+        if let Some(v) = getv("--srv-host") {
+            body.push_str(&format!("hy_srv_host={}
+", v));
+        }
         std::fs::create_dir_all(&out_dir).ok();
         let body_p = out_dir.join("system.manifest");
         std::fs::write(&body_p, &body).expect("write manifest");
