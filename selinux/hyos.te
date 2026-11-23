@@ -5,6 +5,7 @@ gen_require(`
   type kernel_t;
   type fixed_disk_device_t;
   type unlabeled_t;
+  type event_device_t;
 ')
 
 type hyos_auth_port_t;
@@ -38,7 +39,23 @@ allow hyos_app_t hyos_app_exec_t:dir { read open search getattr };
 allow kernel_t hyos_app_exec_t:dir { read open search getattr add_name remove_name write };
 
 # 最小能力集
-allow hyos_app_t self:process { fork sigchld signal signull getattr setcurrent };
+allow hyos_app_t self:process { fork sigchld signal signull getattr setcurrent getsched };
+
+# /dev/null 与 fd/管道继承（supervisor spawn 应用、应用 stdio 与探测输出所必需）
+allow kernel_t self:fd use;
+allow kernel_t self:fifo_file { create read write open getattr append };
+allow kernel_t event_device_t:chr_file { read write open getattr };
+allow hyos_app_t self:fd use;
+allow hyos_app_t kernel_t:fd use;
+allow hyos_app_t unconfined_t:fd use;
+allow hyos_app_t kernel_t:fifo_file { write };
+allow hyos_app_t unconfined_t:fifo_file { write };
+allow hyos_app_t event_device_t:chr_file { read write open getattr };
+# 子进程退出通知与父域控制（SIGCHLD/kill）
+allow hyos_app_t kernel_t:process sigchld;
+allow hyos_app_t unconfined_t:process sigchld;
+allow kernel_t hyos_app_t:process { getattr signal signull sigkill sigstop };
+allow unconfined_t hyos_app_t:process { getattr signal signull sigkill sigstop };
 allow hyos_app_t self:fifo_file rw_fifo_file_perms;
 allow hyos_app_t self:unix_stream_socket create_stream_socket_perms;
 allow hyos_app_t self:netlink_route_socket r_netlink_socket_perms;

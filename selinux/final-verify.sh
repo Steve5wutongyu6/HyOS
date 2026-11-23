@@ -10,7 +10,8 @@ echo "=== 内核版本 ==="
 strings $B/vmlinuz | grep -m1 "Linux version" | head -c 90; echo
 
 echo "=== 1. 策略（v34 原生，无垫片）==="
-bash $REPO/selinux/build-policy.sh 2>&1 | tail -3
+bash $REPO/selinux/build-policy.sh > /tmp/pol-final.log 2>&1 || { echo POLICY_BUILD_FAIL; tail -12 /tmp/pol-final.log /tmp/hyospol-build.log 2>/dev/null; exit 1; }
+grep -a "SELINUX_POLICY_OK" /tmp/pol-final.log || { echo POLICY_BUILD_FAIL; tail -12 /tmp/pol-final.log; exit 1; }
 
 echo "=== 2. 密钥 + 部署密钥嵌入 ==="
 cd $REPO
@@ -31,10 +32,17 @@ $B/mkdisk disk --core $B/core/core.img --vmlinuz $B/vmlinuz --initrd $B/initrd.i
 
 echo "=== 5. 服务端 + rearm ==="
 cd $REPO/server
-curl -sf http://127.0.0.1:8787/v1/health >/dev/null 2>&1 || { setsid nohup npx wrangler dev --local --port 8787 > /tmp/wrangler.log 2>&1 < /dev/null & for i in $(seq 1 40); do sleep 1; curl -sf http://127.0.0.1:8787/v1/health >/dev/null 2>&1 && break; done; }
+# 密钥每次运行都重新生成 → 必须重启 wrangler，否则 SRV_SK_PKCS8 仍是旧内存值（契约"server ed25519 sig"必挂）
+sudo pkill -f "wrangler dev --local" 2>/dev/null
+sleep 1
+setsid nohup npx wrangler dev --local --port 8787 > /tmp/wrangler.log 2>&1 < /dev/null &
+for i in $(seq 1 40); do sleep 1; curl -sf http://127.0.0.1:8787/v1/health >/dev/null 2>&1 && break; done
+curl -sf http://127.0.0.1:8787/v1/health >/dev/null 2>&1 || { echo "WRANGLER_NOT_UP"; tail -12 /tmp/wrangler.log; exit 1; }
 sudo pkill -f "socat TCP4-LISTEN:80" 2>/dev/null
 sudo setsid nohup socat TCP4-LISTEN:80,fork,reuseaddr TCP4:127.0.0.1:8787 >/dev/null 2>&1 & sleep 1
-KEY_SERVER=http://127.0.0.1:8787 node ../tests/contract.mjs 2>&1 | tail -1
+KEY_SERVER=http://127.0.0.1:8787 node ../tests/contract.mjs > /tmp/contract-final.txt 2>&1
+tail -1 /tmp/contract-final.txt
+grep -a "^FAIL" /tmp/contract-final.txt || true
 bash $REPO/tests/rearm.sh 2>&1 | tail -1
 
 echo "=== 6. 引导 ==="
