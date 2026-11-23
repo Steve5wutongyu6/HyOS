@@ -7,6 +7,9 @@ routes = [
   { pattern = "hyos.nanachi.cloud", custom_domain = true }
 ]
 
+# workers.dev 直连地址：CI（数据中心 IP）经 zone WAF/Bot 防护会被 403，绕开域名防护直连 Worker
+workers_dev = true
+
 [[d1_databases]]
 binding = "DB"
 database_name = "hyos"

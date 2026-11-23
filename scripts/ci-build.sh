@@ -50,10 +50,12 @@ echo "did=$DID" > "$B/dist/build-info.txt"
 echo "kernel=$(strings $B/vmlinuz | grep -m1 "Linux version" | head -c 80)" >> "$B/dist/build-info.txt"
 cat "$B/dist/build-info.txt"
 
-echo "=== 8. 注册设备到 Worker（CI 令牌）==="
+echo "=== 8. 注册设备到 Worker（CI 令牌，尽力而为）==="
+# 注意：enroll 是辅助步骤（预注册设备，首启即可用）。被边缘拦截时不应阻断
+# 镜像构建与 S3 上传主线 —— 失败仅告警，可用 OWNER_TOKEN 人工补注册。
 if [ -n "${WORKER_URL:-}" ] && [ -n "${HYOS_CI_TOKEN:-}" ]; then
   python3 - "$WORKSPACE" "$WORKER_URL" "$HYOS_CI_TOKEN" <<PYEOF
-import json, sys, urllib.request
+import json, sys, urllib.request, urllib.error
 ws, url, token = sys.argv[1], sys.argv[2], sys.argv[3]
 fx = json.load(open(ws + "/tests/fixtures/dev-keys.json"))
 body = json.dumps({
@@ -61,10 +63,17 @@ body = json.dumps({
     "wk0_root": fx["wk0_root"], "wk1_root": fx["wk1_root"],
     "dek_sys": fx["dek_sys"], "dek_app": fx["dek_app"], "grub_ver_max": 1,
 }).encode()
+# 自定义 UA：默认 Python-urllib 命中 Cloudflare definitely-automated 名单，机房 IP 直接 403
 req = urllib.request.Request(url.rstrip("/") + "/v1/enroll", data=body,
                              headers={"content-type": "application/json",
-                                      "authorization": "Bearer " + token})
-print("enroll:", urllib.request.urlopen(req, timeout=30).read().decode()[:200])
+                                      "authorization": "Bearer " + token,
+                                      "user-agent": "HyOS-CI/1.0 (enroll)"})
+try:
+    print("ENROLL_OK:", urllib.request.urlopen(req, timeout=30).read().decode()[:200])
+except urllib.error.HTTPError as e:
+    print("ENROLL_FAIL http=%s body=%s" % (e.code, e.read().decode(errors="replace")[:300]))
+except Exception as e:
+    print("ENROLL_FAIL net=%s" % e)
 PYEOF
 else
   echo "SKIP enroll（未提供 WORKER_URL / HYOS_CI_TOKEN）"
