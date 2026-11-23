@@ -100,7 +100,16 @@ else
   : "${CLOUDFLARE_ACCOUNT_ID:=15de2210e69226938367616a4c48dee5}"
   (cd "$REPO/server" && CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:?需 CLOUDFLARE_API_TOKEN}" \
     npx -y wrangler@3.114.17 r2 object put "hyos-artifacts/$R2_KEY" -f "$IMG") \
-    && echo "uploaded r2://hyos-artifacts/$R2_KEY"
+    || { echo "R2_PUT_FAIL"; exit 1; }
+  echo "r2 put done (pending remote verify)"
+  (cd "$REPO/server" && npx -y wrangler@3.114.17 r2 object get "hyos-artifacts/$R2_KEY" -f /tmp/r2-target-verify.img) \
+    || { echo "R2_VERIFY_GET_FAIL"; exit 1; }
+  R2_SHA=$(sha256sum /tmp/r2-target-verify.img | awk '{print $1}')
+  if [ "$R2_SHA" = "$SHA" ]; then
+    echo "R2_VERIFIED sha256=$R2_SHA"
+  else
+    echo "R2_VERIFY_MISMATCH local=$SHA remote=$R2_SHA"; exit 1
+  fi
 fi
 
 echo ""
