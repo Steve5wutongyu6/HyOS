@@ -243,3 +243,17 @@ HID/USB/Wireless/Bluetooth/声音/DRM/Framebuffer/RTC/Watchdog/Thermal/I2C/SPI/M
 | 一机一镜像 | `scripts/build-for-target.sh --name X --net-ip/--net-mask/--net-gw/--srv [--test-mode]`：全新设备密钥 → 注册生产 → 用户态/GRUB 重建（**VK/WK0 必须绑定新密钥**，跳过即销毁）→ 清单注入 → initrd/镜像 → R2 `hyos/targets/<名称>/` |
 | 验证 | 注入镜像 QEMU 引导：`NET UP 10.0.2.15/24` + `NET GW via 10.0.2.2 (netlink onlink)` + APP_OK sealed + **E2E SUCCESS**；默认路径回归：契约 21/21 + E2E SUCCESS |
 | 部署约束 | 目标机必须 BIOS 引导；一机一镜像（共享镜像第二台触发 epoch 回滚销毁）；hy_srv 用 CF 边缘 IP + Host 头（明文 HTTP 传输有中间人风险，TLS 属后续 M 项） |
+
+### 9.9 TLS 化（2026-11-23 追加）
+
+| 项 | 内容 |
+|---|---|
+| 动机 | 明文 HTTP 下中间人可伪造 403 拒绝 ack → 强制销毁（on-path DoS）；TLS 服务器证书校验彻底关闭该攻击面 |
+| 方案 | rustls 0.23（ring 后端，静态链接）+ webpki-roots 内嵌公共 CA；cargo feature `tls` 可选——本地 QEMU 联调走明文 HTTP（本地 worker 无 TLS），生产构建启用 |
+| 时间依赖 | TLS 证书校验需要真实时间 → 内核启用 RTC_CLASS/HCTOSYS/RTC_DRV_CMOS（CMOS 硬件时钟 → 系统时钟），bzImage 3.86→3.88MB |
+| hyinit 改造 | TLS_MODE 静态开关（清单 hy_tls=1）→ http_post 双模式（TCP/rustls）；SNI 与 HTTP Host 同取 hy_srv_host；**supervisor 为独立进程，TLS 标志经 HY_TLS 环境继承**（曾因静态变量不共享导致 supervisor 明文回退被 CF 拒绝销毁） |
+| 失败语义 | hy_tls=1 但二进制不支持 → 拒绝明文回退 → 按服务器不可达销毁（fail-closed，符合宁毁勿漏） |
+| 体积 | hyinit 静态二进制 1.6→2.84MB（+1.2MB TLS 栈） |
+| 生产级验证 | QEMU 客机 → SLIRP NAT → 公网 → CF 边缘 IP:443 → TLS（SNI=hyos.nanachi.cloud，webpki 根校验，真实时间）→ grub_ok/sys_ok/app_ok/alive 全链路加密 ack → **E2E SUCCESS（Q_EXIT=0）** |
+| 回归 | 明文路径 e2e 9/9 ALL PASS（TLS 改造无副作用）；CI 三 job 全绿 |
+| 注意 | CF 边缘 IP 烘焙进镜像：IP 若退役设备将不可达 → 按设计销毁；运维需定期核验烘焙 IP；CMOS 电池失效同样触发 fail-closed |

@@ -10,6 +10,13 @@ path = "src/main.rs"
 [dependencies]
 hyproto = { path = "../proto" }
 libc = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+webpki-roots = { version = "0.26", optional = true }
+
+[features]
+default = []
+# TLS 传输（生产构建启用；本地 QEMU 联调走明文 HTTP）
+tls = ["dep:rustls", "dep:webpki-roots"]
 
 [profile.release]
 panic = "abort"

@@ -19,7 +19,8 @@ export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=${CARGO_TARGET_X86_64_UNKNOW
 export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-feature=+crt-static"
 TGTDIR="target/$TGT/release"
 
-cd verifier && cargo build --release --target $TGT
+# VERIFIER_EXTRA_FLAGS：生产构建传 "--features tls" 启用 rustls（可选依赖，联调构建省略）
+cd verifier && cargo build --release --target $TGT ${VERIFIER_EXTRA_FLAGS:-}
 file $REPO/verifier/$TGTDIR/hyinit | grep -i static || echo "WARN: hyinit not static"
 cp $REPO/verifier/$TGTDIR/hyinit $B/hyinit
 

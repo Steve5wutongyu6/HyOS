@@ -30,6 +30,7 @@ while [ $# -gt 0 ]; do
     --net-gw) NET_GW="$2"; shift 2;;
     --srv) SRV="$2"; shift 2;;
     --srv-host) SRV_HOST="$2"; shift 2;;
+    --tls) TLS=1; shift;;
     --key-server) KEY_SERVER="$2"; shift 2;;
     --ci-token) CI_TOKEN="$2"; shift 2;;
     --test-mode) TEST_MODE=1; shift;;
@@ -61,14 +62,21 @@ fi
 KEY_SERVER="$KEY_SERVER" CI_TOKEN="$CI_TOKEN" node scripts/enroll-device.mjs
 
 echo "=== 3. 用户态（嵌入设备密钥份额）==="
+if [ "${TLS:-0}" = 1 ]; then
+  export VERIFIER_EXTRA_FLAGS="--features tls"
+fi
 bash scripts/build-userland.sh > /tmp/bft-userland.log 2>&1 || { tail -10 /tmp/bft-userland.log; exit 1; }
 
 echo "=== 3b. GRUB 重建（core.img 必须绑定新 VK/WK0，否则清单验签失败即销毁）==="
 bash grub/build-grub.sh > /tmp/bft-grub.log 2>&1 || { tail -8 /tmp/bft-grub.log; exit 1; }
 
 echo "=== 4. 清单（注入目标网络参数，签名固化）==="
+TLS_ARGS=""
+if [ "${TLS:-0}" = 1 ]; then
+  TLS_ARGS="--tls"
+fi
 $B/mkdisk manifest --core $B/core/core.img --keys tests/fixtures/dev-keys.json --out-dir $B/manifests \
-  --net-ip "$NET_IP" --net-mask "$NET_MASK" --net-gw "$NET_GW" --srv "$SRV" --srv-host "$SRV_HOST"
+  --net-ip "$NET_IP" --net-mask "$NET_MASK" --net-gw "$NET_GW" --srv "$SRV" --srv-host "$SRV_HOST" $TLS_ARGS
 
 echo "=== 5. initramfs + 镜像 ==="
 bash scripts/build-initrd.sh > /tmp/bft-initrd.log 2>&1 || { tail -6 /tmp/bft-initrd.log; exit 1; }

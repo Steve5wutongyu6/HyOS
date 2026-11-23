@@ -246,6 +246,14 @@ fn main() {
             body.push_str(&format!("hy_srv_host={}
 ", v));
         }
+        if args.iter().any(|a| a == "--tls") {
+            body.push_str("hy_tls=1
+");
+        }
+        if let Some(v) = getv("--srv-host") {
+            body.push_str(&format!("hy_srv_host={}
+", v));
+        }
         std::fs::create_dir_all(&out_dir).ok();
         let body_p = out_dir.join("system.manifest");
         std::fs::write(&body_p, &body).expect("write manifest");

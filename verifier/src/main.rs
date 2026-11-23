@@ -361,14 +361,26 @@ fn payload_nonce(dek: &[u8; 32]) -> [u8; 12] {
     n
 }
 
+/// TLS 传输开关（来自签名清单 hy_tls=1；静态二进制以 tls feature 编译支持）
+static TLS_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn http_post(srv: &str, path: &str, body: &str) -> Result<(u16, String), String> {
-    use std::net::TcpStream;
-    // srv 形如 "ip:port" 或 "ip:port@host"——@ 后为 HTTP Host 头。
+    // srv 形如 "ip:port" 或 "ip:port@host"——@ 后为 SNI/HTTP Host 头。
     // 经 Cloudflare 边缘 IP 直连时按 Host 路由到对应域名（hyinit 无 DNS 能力）。
     let (conn, hosthdr) = match srv.split_once('@') {
         Some((c, h)) => (c, h),
         None => (srv, "hyos"),
     };
+    if TLS_MODE.load(std::sync::atomic::Ordering::Relaxed) {
+        #[cfg(feature = "tls")]
+        return http_post_tls(conn, hosthdr, path, body);
+        #[cfg(not(feature = "tls"))]
+        {
+            eprintln!("TLS_UNSUPPORTED（二进制未以 tls feature 编译，拒绝明文回退）");
+            return Err("tls-unsupported".to_string());
+        }
+    }
+    use std::net::TcpStream;
     let mut s = TcpStream::connect(conn).map_err(|e| e.to_string())?;
     let req = format!(
         "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
@@ -377,6 +389,45 @@ fn http_post(srv: &str, path: &str, body: &str) -> Result<(u16, String), String>
     s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
     s.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    let txt = String::from_utf8_lossy(&buf).to_string();
+    let head_end = txt.find("\r\n\r\n").ok_or_else(|| "no header end".to_string())?;
+    let status: u16 = txt
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|c| c.parse().ok())
+        .ok_or_else(|| "bad status".to_string())?;
+    Ok((status, txt[head_end + 4..].to_string()))
+}
+
+/// TLS 传输：rustls（ring 后端）+ webpki-roots 内嵌公共 CA。
+/// SNI 与 HTTP Host 同为清单 hy_srv_host；连接地址为 hy_srv 的 IP:443。
+/// 证书校验依赖真实系统时间（内核 RTC_HCTOSYS 从 CMOS 注入）。
+#[cfg(feature = "tls")]
+fn http_post_tls(conn: &str, hosthdr: &str, path: &str, body: &str) -> Result<(u16, String), String> {
+    use std::io::{Read as TRead, Write as TWrite};
+    use std::net::TcpStream;
+    use std::sync::Arc;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let server_name = rustls::pki_types::ServerName::try_from(hosthdr.to_string())
+        .map_err(|e| format!("sni {}", e))?;
+    let tls_conn = rustls::ClientConnection::new(Arc::new(config), server_name)
+        .map_err(|e| format!("tlsconn {}", e))?;
+    let mut stream = rustls::StreamOwned::new(tls_conn, TcpStream::connect(conn).map_err(|e| e.to_string())?);
+    let req = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+        path, hosthdr, body.len(), body
+    );
+    stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+    stream.flush().map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).map_err(|e| e.to_string())?;
     let txt = String::from_utf8_lossy(&buf).to_string();
     let head_end = txt.find("\r\n\r\n").ok_or_else(|| "no header end".to_string())?;
     let status: u16 = txt
@@ -629,6 +680,16 @@ fn run_verify() -> ! {
         .or_else(|| cm.get("hy_srv"))
         .cloned()
         .unwrap_or_else(|| "10.0.2.2:80".into());
+    // TLS 传输开关（签名清单 hy_tls=1；需二进制以 tls feature 编译）
+    TLS_MODE.store(mankv.get("hy_tls").map(|v| v == "1").unwrap_or(false), std::sync::atomic::Ordering::Relaxed);
+    eprintln!(
+        "NET TLS={}",
+        match (TLS_MODE.load(std::sync::atomic::Ordering::Relaxed), cfg!(feature = "tls")) {
+            (true, true) => "ON",
+            (true, false) => "REQUESTED_BUT_UNSUPPORTED",
+            (false, _) => "off",
+        }
+    );
     let epoch: u64 = cm.get("hy_epoch").and_then(|v| v.parse().ok()).unwrap_or(0);
     let grub_ver: u64 = cm.get("hy_ver").and_then(|v| v.parse().ok()).unwrap_or(0);
     let attest = cm.get("hy_attest").cloned().unwrap_or_default();
@@ -775,6 +836,7 @@ fn run_verify() -> ! {
         .arg(&srv)
         .env("HY_CK", hex_encode(&ck))
         .env("HY_DID", did)
+        .env("HY_TLS", if TLS_MODE.load(std::sync::atomic::Ordering::Relaxed) { "1" } else { "0" })
         .env("HY_HB_MS", cm.get("hy_hb_ms").cloned().unwrap_or_else(|| "300000".into()))
         .env("HY_TEST", cm.get("hy_test").cloned().unwrap_or_default())
         .status();
@@ -787,6 +849,8 @@ fn run_verify() -> ! {
 // ---------- supervisor ----------
 
 fn run_supervise(epoch: u64, srv: String) -> ! {
+    // TLS 标志经环境继承（独立进程，静态变量不共享）
+    TLS_MODE.store(std::env::var("HY_TLS").map(|v| v == "1").unwrap_or(false), std::sync::atomic::Ordering::Relaxed);
     // 放开内核日志级别：捕获 SELinux AVC 拒绝记录（诊断与审计）
     let _ = std::fs::write("/proc/sys/kernel/printk", "7 4 1 7");
     if let Ok(ctx) = std::fs::read_to_string("/proc/self/attr/current") {
