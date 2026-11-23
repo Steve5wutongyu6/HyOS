@@ -59,6 +59,13 @@ jobs:
     needs: [unit, contract]
     steps:
       - uses: actions/checkout@v4
+      - name: 缓存源码包（内核 / GRUB tarball，跳过每次全量下载）
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/kernel/linux-*.tar.xz
+            build/grub/grub-*.tar.xz
+          key: srcpkgs-k6.14.11-grub2.12
       - name: 构建依赖
         run: |
           sudo apt-get update -qq

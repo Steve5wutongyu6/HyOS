@@ -16,7 +16,20 @@ if [ ! -f grub-2.12.tar.xz ]; then
   if [ -f "$REPO/build/grub/grub-2.12.tar.xz" ]; then
     cp "$REPO/build/grub/grub-2.12.tar.xz" .
   else
-    curl -fL --retry 3 -o "$REPO/build/grub/grub-2.12.tar.xz" https://ftp.gnu.org/gnu/grub/grub-2.12.tar.xz
+    # 多镜像轮换 + 超时：ftp.gnu.org 在部分机房（如 Azure）会长时间 0 字节挂死
+    dl_ok=0
+    for u in \
+      https://ftp.gnu.org/gnu/grub/grub-2.12.tar.xz \
+      https://mirrors.kernel.org/gnu/grub/grub-2.12.tar.xz \
+      https://mirror.csclub.uwaterloo.ca/gnu/grub/grub-2.12.tar.xz \
+      https://mirrors.ocf.berkeley.edu/gnu/grub/grub-2.12.tar.xz; do
+      echo "GRUB dl: $u"
+      if curl -fL --connect-timeout 15 --max-time 240 --retry 2 -sS -o "$REPO/build/grub/grub-2.12.tar.xz" "$u" && [ -s "$REPO/build/grub/grub-2.12.tar.xz" ]; then
+        dl_ok=1; break
+      fi
+      echo "GRUB dl failed: $u"
+    done
+    [ "$dl_ok" = 1 ] || { echo "ERROR: GRUB 源码包所有镜像均失败"; exit 1; }
     cp "$REPO/build/grub/grub-2.12.tar.xz" .
   fi
 fi

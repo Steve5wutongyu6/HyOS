@@ -15,7 +15,18 @@ if [ ! -f "linux-$KVER.tar.xz" ]; then
   if [ -f "$SRC/build/kernel/linux-$KVER.tar.xz" ]; then
     cp "$SRC/build/kernel/linux-$KVER.tar.xz" .
   else
-    curl -fL --retry 3 -o "$SRC/build/kernel/linux-$KVER.tar.xz" "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$KVER.tar.xz"
+    # 多镜像轮换 + 超时（140MB 大包；cdn.kernel.org 异常时切 mirror.kernel.org）
+    dl_ok=0
+    for u in \
+      "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$KVER.tar.xz" \
+      "https://mirrors.kernel.org/pub/linux/kernel/v6.x/linux-$KVER.tar.xz"; do
+      echo "KERNEL dl: $u"
+      if curl -fL --connect-timeout 15 --max-time 900 --retry 2 -sS -o "$SRC/build/kernel/linux-$KVER.tar.xz" "$u" && [ -s "$SRC/build/kernel/linux-$KVER.tar.xz" ]; then
+        dl_ok=1; break
+      fi
+      echo "KERNEL dl failed: $u"
+    done
+    [ "$dl_ok" = 1 ] || { echo "ERROR: 内核源码包所有镜像均失败"; exit 1; }
     cp "$SRC/build/kernel/linux-$KVER.tar.xz" .
   fi
 fi
