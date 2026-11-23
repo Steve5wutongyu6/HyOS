@@ -109,3 +109,54 @@ limactl shell hyos-dev -- bash /mnt/vmiss/hyos-build/tests/e2e.sh
 4. **prod 变体**：裁剪 shell/SSH，加入 CI 断言（构建产物扫描即失败）。
 5. **CI**：GitHub Actions 构建 + 签名 + S3 上传 + D1 清单发布；dd 全自动部署演练。
 6. **性能回归**：在 TCG 之外用 KVM 硬件加速复测启动时间与 hysteria2 吞吐。
+
+---
+
+## 8. SELinux 强制访问控制联调（2026-11-23 补充轮）
+
+| 项 | 内容 |
+|---|---|
+| 结论 | **enforcing 模式 E2E SUCCESS**：应用域隔离 + 探测矩阵 + 全链路启动均按预期 |
+| 内核 | Linux 6.14.11（x86_64 交叉编译，原生 SELinux，策略版本上限 v33/POLICYDB_VERSION_COND_XPERMS） |
+| 策略 | `selinux/hyos.te`（单块模块，Debian selinux-policy-dev 工具链离线合成，合入基座后版本自动对齐 34→33） |
+| 验证脚本 | `selinux/final-verify.sh`（策略→密钥→用户态→GRUB→镜像→Worker 契约→rearm→引导→证据） |
+
+### 8.1 运行时实现
+
+- hyinit 在 enforcing **之前**向 selinuxfs 单次写入加载单块策略，随后 `setenforce 1`；任何失败即 L3 销毁。
+- `/run` 挂载独立 tmpfs 作为应用运行区；运行期把应用标注为 `hyos_app_exec_t`、supervisor 标注为 `hyos_init_exec_t`（execute_no_trans，驻留 kernel_t）、配置为 `hyos_config_t`、应用私有临时区为 `hyos_tmp_t`。
+- 域转换：`kernel_t --(执行 hyos_app_exec_t)--> hyos_app_t`；`neverallow` 编译期断言块设备读写、危险能力、内核模块加载、同域 ptrace。
+- 部署密钥（读私有配置仓库的 Deploy Key）以 **8 组 XOR 份额**构建期嵌入 `verifier/src/genkeys.rs`（来自 CI Secret `HYOS_GIT_SSH_KEY_B64`，产物不入库），运行期重组写入 `/run/secrets/git_deploy_key`(0600)，`GITKEY_READY bytes=464` 实证。
+
+### 8.2 联调暴露并修复的缺陷（7 项）
+
+| # | 缺陷 | 症状 | 修复 |
+|---|---|---|---|
+| 1 | `gen-hykeys.mjs` 多行 Rust 片段被写成普通双引号 JS 字符串 | SyntaxError，构建链第 2 步起全断 | 改为模板字面量 |
+| 2 | 部署密钥份额 Rust 类型写成 `[[u8; 58]; 8]`（字数），实际每份额为整长 464 字节 | hyinit 编译 E0308 | 类型改为 `[[u8; GIT_KEY_LEN]; 8]`，空密钥回退为 8 组空行 |
+| 3 | final-verify 重新生成密钥后**不重启 wrangler**，内存中 SRV_SK_PKCS8 仍是旧值 | 契约 20/21（仅 `server ed25519 sig` 挂） | 步骤 5 强制重启 Worker 再跑契约 → 21/21 |
+| 4 | **type_transition 目标类型未授权给父角色**（缺 `role system_r types hyos_app_t;`） | `type=1401 security_compute_sid invalid_context` → execve EACCES，且基座 dontaudit 掩蔽（permissive 下同样无 avc） | 模块内补 `role system_r/unconfined_r types hyos_app_t;` |
+| 5 | 应用域 fd/管道/`/dev/null` 继承链缺权限（supervisor `Stdio::null` 打开 `/dev/null`、探测输出管道、SIGCHLD、getsched） | enforcing 下 spawn EACCES（静默） | 补 `event_device_t`、`fd use`、`fifo_file write`、`sigchld`、`getsched` 显式 allow，并将应用 stdin 一并置空 |
+| 6 | tmpfs 挂载根 `/run` 为 `tmpfs_t`，应用无 search 权 → 进不了 `/run/hyos-tmp` | 探测 `TMP_WRITE=DENIED`（应 ALLOWED） | 补 `allow hyos_app_t tmpfs_t:dir { search getattr };` |
+| 7 | CI 镜像 job `apt-get install` 在 ubuntu-24.04 失败（`awscli` 无候选 + Recommends 依赖损坏链，`-qq` 掩蔽细节） | GitHub Actions 构建依赖步骤 exit 100 | 移除 `awscli`（runner 自带 v2）、改 `--no-install-recommends` 并加逐包定位输出 |
+
+### 8.3 enforcing 模式验证证据（deploy-test.img，QEMU x86_64 TCG）
+
+```
+SELINUX_POLICY_BYTES=1715650 / SELINUX_SETUP mounted=true policy_loaded=true / SELINUX_ENFORCE=1
+GITKEY_READY bytes=464
+SELINUX_SUPERVISOR_DOMAIN=system_u:system_r:kernel_t:s0
+SELINUX_APP_LABEL=system_u:object_r:hyos_app_exec_t:s0
+SELINUX_APP_DOMAIN=system_u:system_r:hyos_app_t:s0   (+ 复检 CHILD_ALIVE0/1=true, DOMAIN2=hyos_app_t)
+PROBE BLKDEV_OPEN=DENIED(13)    # 块设备读取被拒（neverallow 断言）
+PROBE CONFIG_WRITE=DENIED(13)   # /etc/hysteria 写被拒
+PROBE TMP_WRITE=ALLOWED         # 仅 /run/hyos-tmp 私有区可写
+PROBE ETC_WRITE=DENIED(13)      # /etc 写被拒
+APP_OK sealed → ADVANCE OK seq=2 → HYOS E2E SUCCESS
+```
+
+诊断手段：内核参数 `hy_enforce=0` 可进 permissive 复跑（拒绝仍放行并留痕）；运行期回读文件 xattr 与 `/proc/mounts`；`type=1401 invalid_context` 事件是本轮定位角色授权缺失的关键线索。
+
+### 8.4 CI 状态
+
+- GitHub Actions（Steve5wutongyu6/HyOS）：单元测试 6/6 ✅、Worker 契约 21/21 ✅（Secrets 注入 + 本地 D1）；镜像 job 在依赖安装修复后执行内核/GRUB/用户态/SELinux/制品全量构建并上传 S3。

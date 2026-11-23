@@ -13,6 +13,7 @@
 | GRUB (S1) | 上电自校验(窗口哈希 + Ed25519 签名 + 白盒常量) → 双槽解析 → 用白盒 KEK 解槽内 wrap → AES-256-GCM 解密系统镜像入内存 → 注册 hyram 内存盘 → 引导内核 |
 | 内核/initramfs (S2) | 反向校验 GRUB(版本/镜像哈希/DK 签名钉扎) → 校验系统清单 → 解密应用包(DEK2)入 tmpfs → 校验 app.manifest |
 | 应用层 (S3) | 反向校验系统(rootfs 哈希 + 密钥一致性) → 短时令牌拉取私有 Git 配置(仅内存) → 按清单启动服务 |
+| SELinux (S3+) | enforcing 最小权限：应用锁定 `hyos_app_t` 域（块设备/危险能力/ptrace 编译期 neverallow），仅 `/run/hyos-tmp` 可写，配置只读；策略单块离线合成、构建期嵌入 |
 | 运行期 (S4) | 签名 ack 心跳、epoch 推进、失联即销毁 |
 
 **销毁等级**：L0 GRUB 自毁 / L1 镜像区 / L2 应用包 / L3 应用自毁 / L4 未签名执行(待 IMA 落地) / L5 运行期失联全盘。
@@ -47,7 +48,7 @@ limactl shell hyos-dev -- bash /mnt/vmiss/hyos-build/tests/e2e.sh
 
 `tests/e2e.sh` 会依次完成：清场 → 生成设备密钥 → 启动本地 Worker(wrangler dev + 本地 D1) → Worker 契约测试 → 全量构建(GRUB core.img / hyinit / initrd / 磁盘镜像) → 9 个引导场景断言(正常启动、epoch 推进、re-arm、L0–L5 销毁)。
 
-最近一次结果：**9/9 场景通过，契约 21/21**（见 `docs/lima-验证报告.md`）。
+最近一次结果：**9/9 场景通过，契约 21/21；SELinux enforcing 模式 E2E SUCCESS**（应用域隔离 + 最小权限探测矩阵，见 `docs/lima-验证报告.md` §8）。
 
 ---
 
