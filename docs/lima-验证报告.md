@@ -204,3 +204,13 @@ HID/USB/Wireless/Bluetooth/声音/DRM/Framebuffer/RTC/Watchdog/Thermal/I2C/SPI/M
 - `final-verify.sh`：策略 1715650B → enforcing → GITKEY_READY 464B → 探测矩阵（块设备/配置/tmpfs//etc）→ APP_OK sealed → ADVANCE OK → **E2E SUCCESS**；契约 **21/21**。
 - `tests/e2e.sh` 全量 9 场景：e1/e7/e8 `E2E SUCCESS`；e2/e3/e4/e5/e6 销毁标记齐全（L0/L1/grub_ok-refused/L2/L3）；e9 `L5 WIPE` → **E2E ALL PASS**。
 - 构建脚本同时修复：用户态统一显式 `--target x86_64`（修复 CI proc-macro 单元异常；`crt-static` 仅经 CARGO_TARGET_* 注入，proc-macro 宿主工件不受污染）。
+
+### 9.5 CI 镜像 job 第 5 步失败根因（2026-11-23 追加）
+
+| 项 | 内容 |
+|---|---|
+| 症状 | runner 上 `build-policy.sh` 180ms 内静默退出，exit code 2，零输出（内核/用户态均已构建成功） |
+| 根因 | `set -euo pipefail` 下 `POL=$(ls /etc/selinux/default/policy/policy.* 2>/dev/null | sort -V | tail -1)`——Ubuntu runner 无 SELinux 策略商店，`ls` 退出码 2，pipefail 经命令替换传播直接终止脚本（Debian VM 有基座商店故本地不可复现） |
+| 复现 | VM 中移走 `/etc/selinux/default` 后运行脚本 → 完全复现（exit 2 / 零输出） |
+| 修复 | ① `ls` 加 `|| true` 守卫 + 缺商店时显式报错退出 1；② CI apt 增加 `selinux-policy-default`（提供基座策略，runner 与 VM 同构）；③ `expand-check=0` 写入 semanage.conf（对齐 VM，加速 semodule 合并） |
+| 验证 | 本地：有商店 `SELINUX_POLICY_OK bytes=1715650` ✓；无商店显式报错 exit 1 ✓；purge+重装包后 postinst 重建商店路径与 runner 全新装包一致 ✓ |

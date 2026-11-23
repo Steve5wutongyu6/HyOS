@@ -12,6 +12,9 @@ have=1
 for p in $need; do dpkg -s "$p" >/dev/null 2>&1 || have=0; done
 if [ "$have" = 0 ]; then sudo apt-get install -y -qq $need >/dev/null 2>&1; fi
 
+# expand-check=0：跳过模块扩展时的全量依赖校验（VM 与 CI 同构，显著加速 semodule 合并）
+grep -q "expand-check" /etc/selinux/semanage.conf 2>/dev/null || echo "expand-check=0" | sudo tee -a /etc/selinux/semanage.conf >/dev/null
+
 cd "$WORK"
 cp "$REPO/selinux/hyos.te" "$REPO/selinux/hyos.fc" .
 rm -f hyos.pp
@@ -20,7 +23,9 @@ make -f /usr/share/selinux/devel/Makefile hyos.pp >/tmp/hyospol-build.log 2>&1 |
 # 合入基础策略并重建二进制策略（-n 表示不重载内核）
 sudo semodule -s default -n -i "$WORK/hyos.pp" >/dev/null 2>&1 || true
 sudo semodule -s default -n -B >/dev/null 2>&1 || true
-POL=$(ls -1 /etc/selinux/default/policy/policy.* 2>/dev/null | sort -V | tail -1)
+# 注意：pipefail 下裸 ls 找不到文件会以退出码 2 静默杀掉整个脚本（CI runner 无策略商店时复现）
+POL=$(ls -1 /etc/selinux/default/policy/policy.* 2>/dev/null | sort -V | tail -1 || true)
+[ -n "$POL" ] || { echo "ERROR: no host SELinux policy store (/etc/selinux/default) —— 需要 selinux-policy-default 包提供基座策略"; exit 1; }
 [ -n "$POL" ] || { echo "no merged policy found"; exit 1; }
 sudo cp "$POL" "$OUT/policy"
 sudo chown "$(id -u):$(id -g)" "$OUT/policy" 2>/dev/null || true
