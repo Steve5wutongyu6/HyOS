@@ -89,13 +89,12 @@ const rs = [
   sharesRust(DK_SEED_HEX),
   "];",
   "pub const WK1_ROOT: [u8; 32] = " + hx(fx.wk1_root) + ";",
-  "pub const PINNED_GRUB_VER: u64 = 1;
-
-// ---- CI 部署密钥（读取私有配置仓库）：8 组 XOR 份额，运行期重组，不落盘明文常量 ----
+  "pub const PINNED_GRUB_VER: u64 = 1;" + NL +
+`// ---- CI 部署密钥（读取私有配置仓库）：8 组 XOR 份额，运行期重组，不落盘明文常量 ----
 pub const GIT_KEY_LEN: usize = ${GIT_KEY_LEN};
 pub const GIT_KEY_SH: [[u8; ${GIT_N}]; 8] = [
   ${GIT_SHARES}
-];",
+];`,
   "",
 ].join(NL);
 writeFileSync(join(ROOT, "verifier/src/genkeys.rs"), rs);
