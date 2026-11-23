@@ -14,6 +14,10 @@ dist/
 # 本地机密（绝不入库）
 server/.dev.vars
 tests/fixtures/dev-keys.json
+
+# 生成产物（构建期由 scripts/gen-hykeys.mjs 产出，含密钥份额 → 不入库）
+grub/hykeys.h
+verifier/src/genkeys.rs
 *.pem
 *.key
 id_rsa*
