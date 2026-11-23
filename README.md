@@ -56,6 +56,17 @@ limactl shell hyos-dev -- bash /mnt/vmiss/hyos-build/tests/e2e.sh
 
 工作流见 `.github/workflows/build.yml`。所有机密均通过 **GitHub Secrets** 注入，仓库内不含任何明文凭据。
 
+## 生产部署
+
+| 组件 | 值 |
+|---|---|
+| 密钥服务 | Cloudflare Worker `hyos-keyserver`，生产地址 **https://hyos.nanachi.cloud**（custom domain，自动 DNS/证书） |
+| 数据库 | Cloudflare D1 `hyos`（`schema.sql` 已应用） |
+| Secrets | `CI_TOKEN` / `OWNER_TOKEN` / `SRV_SK_PKCS8` 经 `wrangler secret` 注入（生成器：`scripts/gen-prod-secrets.mjs`，产物存仓库外） |
+| CI 联动 | GH Actions 变量 `WORKER_URL` + Secret `HYOS_CI_TOKEN` → 构建尾自动 enroll 新设备；产物上传 S3 私有桶 |
+
+运维操作：`OWNER_TOKEN` 用于 `/v1/rearm`（允许旧磁盘头再启动）与 `/v1/revoke`（立即吊销，下次启动即销毁）。
+
 | Secret | 用途 |
 |---|---|
 | `HYOS_GIT_SSH_KEY` | 读取私有配置仓库(HysteriaConfig)的**只读 Deploy Key** |
