@@ -160,3 +160,47 @@ APP_OK sealed → ADVANCE OK seq=2 → HYOS E2E SUCCESS
 ### 8.4 CI 状态
 
 - GitHub Actions（Steve5wutongyu6/HyOS）：单元测试 6/6 ✅、Worker 契约 21/21 ✅（Secrets 注入 + 本地 D1）；镜像 job 在依赖安装修复后执行内核/GRUB/用户态/SELinux/制品全量构建并上传 S3。
+
+---
+
+## 9. 内核最小化裁剪（2026-11-23 补充轮）
+
+| 项 | 裁剪前 | 裁剪后 |
+|---|---|---|
+| 配置基线 | x86_64 `defconfig`（全量驱动 + 模块） | `allnoconfig` + 白名单合并（`scripts/kernel-minimal.config`） |
+| bzImage | 13.4 MB | **4.35 MB（3.1 倍缩减）** |
+| 可配置项 | ~2500 项 =y | **851 项 =y，0 模块** |
+| 构建校验 | 无 | 47 项关键选项断言 + MODULES 必关断言（缺一即构建失败） |
+
+### 9.1 保留清单（应用层运行所需）
+
+| 类别 | 组件 | 用途 |
+|---|---|---|
+| 核心 | printk/epoll/futex/timer/membarrier/BINFMT_ELF/procfs/sysfs/tmpfs/devtmpfs | Rust 用户态 + supervisor 运行基座 |
+| 控制台 | SERIAL_8250(+CONSOLE) | 串口审计标记（E2E 判定依据） |
+| 块设备 | ATA/ATA_PIIX/SATA_AHCI/SCSI/BLK_DEV_SD + VIRTIO_BLK | 测试 QEMU IDE / 生产 KVM virtio；销毁写盘与镜像读取 |
+| 网络 | IPv4/UNIX/CUBIC + E1000 + VIRTIO_NET | hysteria2(UDP/443) 与密钥服务通信 |
+| netfilter | NF_CONNTRACK/NF_NAT/IP_NF_* + XT_NAT(DNAT) | 端口跳跃（20000:60000 → 443 DNAT） |
+| 安全 | SELinux(+AUDIT/SECURITY_NETWORK 依赖链)、STACKPROTECTOR(+STRONG)、KASLR | 强制访问控制与硬化 |
+| 平台 | ACPI/PCI/MSI/IOAPIC/KVM_GUEST/PARAVIRT/RELOCATABLE | BIOS/KVM 引导与 S5 断电（L5 销毁） |
+| 随机源 | HW_RANDOM(+VIRTIO) | GCM/Ed25519 熵源 |
+
+### 9.2 显式移除（实测不再编入）
+
+HID/USB/Wireless/Bluetooth/声音/DRM/Framebuffer/RTC/Watchdog/Thermal/I2C/SPI/MMC/GPIO/EFI/Microcode、IPv6、全部磁盘文件系统(ext4/btrfs/xfs/9p/fuse)、Modules/Kexec/Hibernation/Swap/SysVIPC/io_uring/seccomp/kallsyms/namespaces/cgroups/perf/audit 以外审计组件。
+
+### 9.3 过程中暴露的配置陷阱（对后续内核升级有参考价值）
+
+| 陷阱 | 说明 |
+|---|---|
+| SELinux 依赖链 | `SECURITY_SELINUX` depends on `AUDIT && SECURITY_NETWORK && NET && INET`，缺一被 olddefconfig 静默丢弃 → 必须断言校验 |
+| `NETFILTER_XT_TARGET_DNAT` 已并入 | 6.14 中 DNAT 目标由 `IP_NF_NAT` 自动 select 的 `XT_NAT` 提供，独立符号不存在 |
+| STACKPROTECTOR 父子项 | `STACKPROTECTOR_STRONG` 依赖 `STACKPROTECTOR`（默认 y 但 allnoconfig 全关） |
+| KASLR/IOAPIC | `RANDOMIZE_BASE` 依赖 `RELOCATABLE`；`X86_IO_APIC` 为 def_bool（显式写 `CONFIG_IO_APIC=y` 无效符号） |
+| devtmpfs 必显式 | allnoconfig 下 `DEVTMPFS(_MOUNT)` 默认关，缺了 hyinit 无法挂载 /dev → spawn 失败 |
+
+### 9.4 裁剪内核回归验证（本地 Lima，一次性提交前全绿）
+
+- `final-verify.sh`：策略 1715650B → enforcing → GITKEY_READY 464B → 探测矩阵（块设备/配置/tmpfs//etc）→ APP_OK sealed → ADVANCE OK → **E2E SUCCESS**；契约 **21/21**。
+- `tests/e2e.sh` 全量 9 场景：e1/e7/e8 `E2E SUCCESS`；e2/e3/e4/e5/e6 销毁标记齐全（L0/L1/grub_ok-refused/L2/L3）；e9 `L5 WIPE` → **E2E ALL PASS**。
+- 构建脚本同时修复：用户态统一显式 `--target x86_64`（修复 CI proc-macro 单元异常；`crt-static` 仅经 CARGO_TARGET_* 注入，proc-macro 宿主工件不受污染）。
