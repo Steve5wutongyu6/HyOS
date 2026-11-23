@@ -394,7 +394,11 @@ fn selinux_setup() -> bool {
         Err(e) => eprintln!("SELINUX_POLICY_READ_ERR errno={:?}", e.raw_os_error()),
     }
     let _ = std::fs::write("/proc/sys/kernel/printk", "1 4 1 7");
-    let _ = std::fs::write("/sys/fs/selinux/enforce", "1");
+    // 诊断：cmdline 传 hy_enforce=0 时保持 permissive（默认 enforcing）；permissive 下拒绝仍记录 AVC 但放行
+    let permissive = std::fs::read_to_string("/proc/cmdline")
+        .map(|c| c.contains("hy_enforce=0"))
+        .unwrap_or(false);
+    let _ = std::fs::write("/sys/fs/selinux/enforce", if permissive { "0" } else { "1" });
     let _ = std::fs::create_dir_all("/run/apps");
     let _ = std::fs::create_dir_all("/run/hyos-tmp");
     eprintln!("SELINUX_SETUP mounted={} policy_loaded={}", mounted, loaded);
@@ -623,7 +627,27 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
         Ok(m) => eprintln!("APP_FILE_OK size={}", m.len()),
         Err(e) => eprintln!("APP_FILE_ERR errno={:?}", e.raw_os_error()),
     }
+    // 诊断：读回应用文件实际生效的 SELinux 标签 + /run 挂载标志
+    unsafe {
+        let p = std::ffi::CString::new("/run/apps/hello").unwrap();
+        let n = std::ffi::CString::new("security.selinux").unwrap();
+        let mut buf = [0u8; 256];
+        let r = libc::lgetxattr(p.as_ptr(), n.as_ptr(), buf.as_mut_ptr() as *mut libc::c_void, buf.len());
+        if r >= 0 {
+            eprintln!("SELINUX_APP_LABEL={}", String::from_utf8_lossy(&buf[..r as usize]).trim_end_matches('\0'));
+        } else {
+            eprintln!("SELINUX_APP_LABEL=unreadable");
+        }
+    }
+    if let Ok(m) = std::fs::read_to_string("/proc/mounts") {
+        for line in m.lines() {
+            if line.contains(" /run ") {
+                eprintln!("RUN_MOUNT={}", line);
+            }
+        }
+    }
     let mut child = match Command::new(app_path)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -640,8 +664,10 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
         Ok(ctx) => eprintln!("SELINUX_APP_DOMAIN={}", ctx.trim()),
         Err(_) => eprintln!("SELINUX_APP_DOMAIN=unreadable"),
     }
+    // SELinux 证据 1b：立即复检进程存活（排除 pid 复用干扰）
+    eprintln!("CHILD_ALIVE0={}", matches!(child.try_wait(), Ok(None)));
     // SELinux 证据 2：在受限域内探测（块设备/配置写应被拒绝，tmpfs 写应成功）
-    match Command::new(app_path).arg("--probe").output() {
+    match Command::new(app_path).arg("--probe").stdin(std::process::Stdio::null()).output() {
         Ok(o) => {
             for line in String::from_utf8_lossy(&o.stdout).lines() {
                 eprintln!("PROBE {}", line);
@@ -665,6 +691,12 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
 
     let mut fails = 0u32;
     let mut oks = 0u32;
+    // SELinux 证据 1c：心跳前复检应用域与存活（app_ok 之后）
+    match std::fs::read_to_string(format!("/proc/{}/attr/current", child.id())) {
+        Ok(ctx) => eprintln!("SELINUX_APP_DOMAIN2={}", ctx.trim()),
+        Err(_) => eprintln!("SELINUX_APP_DOMAIN2=unreadable"),
+    }
+    eprintln!("CHILD_ALIVE1={}", matches!(child.try_wait(), Ok(None)));
     loop {
         std::thread::sleep(std::time::Duration::from_millis(hb_ms));
         if let Ok((200, _)) = ack(&did, "alive", epoch, &srv) {
@@ -683,7 +715,11 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
             }
         }
         if let Ok(Some(_)) = child.try_wait() {
-            child = match Command::new(app_path).spawn() {
+            child = match Command::new(app_path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn() {
                 Ok(c) => c,
                 Err(_) => l3_wipe(&srv, &did, epoch, "respawn"),
             };

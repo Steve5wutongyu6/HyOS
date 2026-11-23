@@ -62,11 +62,16 @@ jobs:
       - name: 构建依赖
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential gcc-multilib gcc-i686-linux-gnu \
-            bison flex bc libssl-dev libelf-dev python3 python3-pip cpio gzip \
-            mtools dosfstools xorriso gawk pkg-config qemu-utils \
-            checkpolicy policycoreutils selinux-policy-dev semodule-utils \
-            autoconf automake autopoint gettext nodejs npm
+          PKGS="build-essential gcc-multilib gcc-i686-linux-gnu bison flex bc libssl-dev libelf-dev python3 python3-pip cpio gzip mtools dosfstools xorriso gawk pkg-config qemu-utils checkpolicy policycoreutils selinux-policy-dev semodule-utils autoconf automake autopoint gettext nodejs npm"
+          if ! sudo apt-get install -y --no-install-recommends $PKGS; then
+            echo "=== 整体安装失败，逐包定位 ==="
+            MISS=""
+            for p in $PKGS; do
+              sudo apt-get install -y --no-install-recommends "$p" >/dev/null 2>&1 || { echo "BROKEN: $p"; MISS="$MISS $p"; }
+            done
+            echo "MISSING_LIST=$MISS"
+            exit 1
+          fi
       - name: AWS CLI（runner 自带 v2，缺省时安装）
         run: command -v aws >/dev/null 2>&1 || { curl -sfL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscli.zip && cd /tmp && unzip -q awscli.zip && sudo ./aws/install; }
       - uses: actions/setup-node@v4

@@ -6,7 +6,15 @@ gen_require(`
   type fixed_disk_device_t;
   type unlabeled_t;
   type event_device_t;
+  type tmpfs_t;
+  role system_r;
+  role unconfined_r;
 ')
+
+# 域转换目标类型必须被父域所在角色授权，否则 security_compute_sid 判定 invalid_context，
+# 内核拒绝转换 → execve EACCES（type=1401 审计事件）
+role system_r types hyos_app_t;
+role unconfined_r types hyos_app_t;
 
 type hyos_auth_port_t;
 corenet_port(hyos_auth_port_t)
@@ -51,6 +59,8 @@ allow hyos_app_t unconfined_t:fd use;
 allow hyos_app_t kernel_t:fifo_file { write };
 allow hyos_app_t unconfined_t:fifo_file { write };
 allow hyos_app_t event_device_t:chr_file { read write open getattr };
+# tmpfs 挂载根目录遍历（/run 根为 tmpfs_t；应用仅需 search 以进入 /run/hyos-tmp）
+allow hyos_app_t tmpfs_t:dir { search getattr };
 # 子进程退出通知与父域控制（SIGCHLD/kill）
 allow hyos_app_t kernel_t:process sigchld;
 allow hyos_app_t unconfined_t:process sigchld;
