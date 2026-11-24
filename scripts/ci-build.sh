@@ -29,7 +29,8 @@ bash scripts/build-kernel.sh
 echo "=== 3. GRUB + hyverify ==="
 bash grub/build-grub.sh
 
-echo "=== 4. 用户态（hyinit / stubapp / mkdisk）==="
+echo "=== 4. 用户态（hyinit / stubapp / mkdisk，生产启用 TLS+ACME）==="
+export VERIFIER_EXTRA_FLAGS="--features tls"
 bash scripts/build-userland.sh
 
 echo "=== 5. SELinux 策略 ==="

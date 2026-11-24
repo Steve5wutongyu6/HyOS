@@ -1055,6 +1055,12 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
             // M5.1 证书自动续期：ACME DNS-01 签发（写 /run/apps/tls/，失败回落应用包内置证书）
             let acme_domain = std::env::var("HY_ACME_DOMAIN").unwrap_or_default();
             if !acme_domain.is_empty() {
+                #[cfg(not(feature = "tls"))]
+                {
+                    eprintln!("CERT_SKIP（二进制未启用 tls feature；回落内置证书）");
+                }
+                #[cfg(feature = "tls")]
+                {
                 let wk1 = std::env::var("HY_WK1_ROOT").unwrap_or_default();
                 let staging = std::env::var("HY_ACME_STAGING").map(|v| v == "1").unwrap_or(false);
                 eprintln!("CERT_ISSUING domain={} staging={}", acme_domain, staging);
@@ -1090,6 +1096,7 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
                 }
                 if !issued {
                     eprintln!("CERT_FAIL_FINAL（回落应用包内置证书，到期前需人工处理）");
+                }
                 }
             }
             cmd.arg("server").arg("-c").arg("/run/apps/config.yaml");
