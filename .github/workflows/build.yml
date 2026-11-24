@@ -14,6 +14,10 @@ on:
         type: choice
         options: [debug, prod]
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -69,13 +73,14 @@ jobs:
       - name: 构建依赖
         run: |
           sudo apt-get update -qq
-          PKGS="build-essential gcc-multilib gcc-i686-linux-gnu bison flex bc libssl-dev libelf-dev python3 python3-pip cpio gzip mtools dosfstools xorriso gawk pkg-config qemu-utils checkpolicy policycoreutils selinux-policy-dev selinux-policy-default semodule-utils autoconf automake autopoint gettext nodejs npm"
-          if ! sudo apt-get install -y --no-install-recommends $PKGS; then
-            echo "=== 整体解析冲突，逐包顺序安装（实测全部可独立安装） ==="
-            for p in $PKGS; do
-              sudo apt-get install -y --no-install-recommends "$p" || { echo "BROKEN: $p"; exit 1; }
-            done
-          fi
+          # nodejs/npm 由 setup-node 提供；python3/pip/pkg-config runner 预装；qemu-utils CI 不需要
+          # noble 上 gcc-multilib 与 gcc-i686 组合解析有冲突（逐包可独立安装）→ 直接逐包
+          for p in build-essential gcc-multilib gcc-i686-linux-gnu bison flex bc libssl-dev libelf-dev \
+                   cpio gzip mtools dosfstools xorriso gawk pkg-config \
+                   checkpolicy policycoreutils selinux-policy-dev selinux-policy-default semodule-utils \
+                   autoconf automake autopoint gettext; do
+            sudo apt-get install -y --no-install-recommends "$p" || { echo "BROKEN: $p"; exit 1; }
+          done
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
