@@ -10,6 +10,9 @@
 export interface Env {
   DB: D1Database;
   CI_TOKEN?: string;
+  CF_DNS_TOKEN?: string;
+  CF_DNS_ZONE_ID?: string;
+  ACME_DOMAIN?: string;
   OWNER_TOKEN?: string;
   SRV_SK_PKCS8?: string; // hex of PKCS8 Ed25519 private key
 }
@@ -265,6 +268,56 @@ async function handleEnroll(env: Env, req: Request): Promise<Response> {
   return j({ ok: true, did: b.did, status: "provisioned" });
 }
 
+// ---------- acme-dns：设备 DK 签名鉴权的 DNS-01 TXT 代理（M5.1 证书续期） ----------
+// 设备向 LE 申请证书时持有 DNS-01 挑战 token；Worker 代为写/删 TXT 记录。
+// 设备永不持有 CF 凭据；鉴权与 /v1/ack 相同（DK 签名 + 设备白名单域名）。
+async function handleAcmeDns(env: Env, req: Request): Promise<Response> {
+  if (!env.CF_DNS_TOKEN || !env.CF_DNS_ZONE_ID) return j({ error: "acme_dns_disabled" }, 501);
+  const b = await req.json().catch(() => ({})) as any;
+  const { did, epoch, domain, token, action } = b || {};
+  if (!did || !epoch || !domain || !token || !action) return j({ error: "bad_request" }, 400);
+  if (action !== "set" && action !== "clear") return j({ error: "bad_action" }, 400);
+  // 域名白名单：设备只能为本机绑定的 ACME 域名申请验证
+  const allowed = (env.ACME_DOMAIN || "").split(",").map((x: string) => x.trim()).filter(Boolean);
+  if (allowed.length && !allowed.includes(domain)) {
+    await logEvent(env, did, "acme_dns_denied", epoch, "domain=" + domain);
+    return j({ error: "domain_not_allowed" }, 403);
+  }
+  const dev = await getDevice(env, did);
+  if (!dev) return j({ error: "unknown_device" }, 404);
+  if (dev.status === "revoked" || dev.status === "quarantine") return j({ error: "denied" }, 403);
+  const nonceB64 = String(b.nonce || "");
+  if (!nonceB64) return j({ error: "missing_nonce" }, 400);
+  const m = enc.encode(did + "|acme_dns|" + epoch + "|" + nonceB64 + "|" + domain + "|" + token);
+  if (!(await dkVerify(dev.dk_pub, m, b.sig || ""))) {
+    await logEvent(env, did, "acme_dns_denied", epoch, "bad_sig");
+    return j({ error: "bad_sig" }, 403);
+  }
+  const recName = "_acme-challenge." + domain;
+  const zq = "https://api.cloudflare.com/client/v4/zones/" + env.CF_DNS_ZONE_ID + "/dns_records?name=" + encodeURIComponent(recName) + "&type=TXT";
+  const zr = await fetch(zq, { headers: { authorization: "Bearer " + env.CF_DNS_TOKEN } });
+  if (!zr.ok) return j({ error: "cf_list_fail" }, 502);
+  const zl = (await zr.json()) as any;
+  if (action === "set") {
+    // upsert：先删同下全部旧 TXT（多次尝试不堆积陈旧 token 记录）
+    for (const rec of (zl.result || [])) {
+      await fetch("https://api.cloudflare.com/client/v4/zones/" + env.CF_DNS_ZONE_ID + "/dns_records/" + rec.id,
+        { method: "DELETE", headers: { authorization: "Bearer " + env.CF_DNS_TOKEN } });
+    }
+    const c = await fetch("https://api.cloudflare.com/client/v4/zones/" + env.CF_DNS_ZONE_ID + "/dns_records",
+      { method: "POST", headers: { authorization: "Bearer " + env.CF_DNS_TOKEN, "content-type": "application/json" },
+        body: JSON.stringify({ type: "TXT", name: recName, content: token, ttl: 120 }) });
+    if (!c.ok) return j({ error: "cf_set_fail" }, 502);
+  } else {
+    for (const rec of (zl.result || [])) {
+      await fetch("https://api.cloudflare.com/client/v4/zones/" + env.CF_DNS_ZONE_ID + "/dns_records/" + rec.id,
+        { method: "DELETE", headers: { authorization: "Bearer " + env.CF_DNS_TOKEN } });
+    }
+  }
+  await logEvent(env, did, "acme_dns_" + action, epoch, domain);
+  return j({ ok: true, action, domain });
+}
+
 // ---------- owner：revoke / quarantine-clear / rearm / policy ----------
 async function ownerGate(env: Env, req: Request): Promise<boolean> {
   return !!env.OWNER_TOKEN && req.headers.get("authorization") === "Bearer " + env.OWNER_TOKEN;
@@ -297,6 +350,7 @@ export default {
       if (p === "/v1/boot/challenge" && req.method === "GET") return handleChallenge(env, url);
       if (p === "/v1/ack" && req.method === "POST") return handleAck(env, req);
       if (p === "/v1/enroll" && req.method === "POST") return handleEnroll(env, req);
+      if (p === "/v1/acme-dns" && req.method === "POST") return handleAcmeDns(env, req);
       if (p.startsWith("/v1/") && req.method === "POST") return handleOwner(env, req, url);
       return j({ error: "not_found" }, 404);
     } catch (e: any) {

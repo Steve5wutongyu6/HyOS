@@ -22,6 +22,8 @@ SRV=""; SRV_HOST="hyos.nanachi.cloud"
 KEY_SERVER="https://hyos.nanachi.cloud"
 CI_TOKEN="${HYOS_CI_TOKEN:-}"
 SKIP_UPLOAD=0
+ACME_DOMAIN=""
+ACME_STAGING=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --name) NAME="$2"; shift 2;;
@@ -31,6 +33,8 @@ while [ $# -gt 0 ]; do
     --srv) SRV="$2"; shift 2;;
     --srv-host) SRV_HOST="$2"; shift 2;;
     --tls) TLS=1; shift;;
+    --acme-domain) ACME_DOMAIN="$2"; shift 2;;
+    --acme-staging) ACME_STAGING=1; shift;;
     --key-server) KEY_SERVER="$2"; shift 2;;
     --ci-token) CI_TOKEN="$2"; shift 2;;
     --test-mode) TEST_MODE=1; shift;;
@@ -110,7 +114,8 @@ if [ "${TLS:-0}" = 1 ]; then
   TLS_ARGS="--tls"
 fi
 $B/mkdisk manifest --core $B/core/core.img --keys tests/fixtures/dev-keys.json --out-dir $B/manifests \
-  --net-ip "$NET_IP" --net-mask "$NET_MASK" --net-gw "$NET_GW" --srv "$SRV" --srv-host "$SRV_HOST" $TLS_ARGS
+  --net-ip "$NET_IP" --net-mask "$NET_MASK" --net-gw "$NET_GW" --srv "$SRV" --srv-host "$SRV_HOST" $TLS_ARGS \
+  ${ACME_DOMAIN:+--acme-domain "$ACME_DOMAIN"} ${ACME_STAGING:+--acme-staging}
 
 echo "=== 5. initramfs + 镜像 ==="
 bash scripts/build-initrd.sh > /tmp/bft-initrd.log 2>&1 || { tail -6 /tmp/bft-initrd.log; exit 1; }

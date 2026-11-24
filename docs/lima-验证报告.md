@@ -277,3 +277,16 @@ HID/USB/Wireless/Bluetooth/声音/DRM/Framebuffer/RTC/Watchdog/Thermal/I2C/SPI/M
 2. **test-mode 关机窗口**：E2E SUCCESS 后 2s 断电 → 客户端测试必须用生产 cfg（VM 常驻）
 3. **wrangler/wrangler 日志/串口文件 root 所有权**：sudo rm
 4. **boot 失败后的再引导**：服务端状态机拒绝重复 grub_ok → 必须 OWNER_TOKEN rearm 后再 boot（防回滚设计）
+
+### 9.11 证书自动续期（ACME DNS-01，2026-11-25 追加）
+
+| 项 | 内容 |
+|---|---|
+| 动机 | 现役 ACME 证书有效期至 2027-02，到期未续 → hysteria 无法启动 → fail-closed；此前依赖人工续期 |
+| 架构 | 设备内置 **ACME v2 (RFC 8555) DNS-01 客户端**（verifier/src/acme.rs，rustls+ring）：LE 账户创建（ES256 JWS）→ newOrder → DNS-01 → finalize(CSR DER 手工构造) → 证书下载 |
+| 安全模型 | **设备永不持有 Cloudflare 凭据**：DNS-01 挑战经密钥服务 /v1/acme-dns 代理（设备 DK 签名鉴权，同 ack 信任模型）；域名白名单（ACME_DOMAIN Secret）；revoke/quarantine 即拒绝 |
+| 证书密钥 | 每次签发随机新生成 P-256（≠ 账户密钥，规避 LE duplicate 限流）；CSR 含 CN+SAN；PKCS#8 PEM 输出 |
+| 无持久化 | 账户密钥可确定性重建/随机重建；证书与私钥仅存 tmpfs（0600），随下次引导轮换 |
+| 签发失败 | 3 次重试后回落应用包内置证书（到期前人工处理）——引导不中断 |
+| staging 验证 | **LE staging 全链路实测通过**：账户 OK → DNS-01 挑战 valid（Worker 代理写 TXT → LE 多视角验证）→ finalize → 证书下载 → hysteria 用新证书启动（server up :443） |
+| 调试要点 | ① LE 接口返回格式化 JSON（冒号带空格）→ JSON 提取需空白容忍；② 状态轮询匹配同理；③ PKCS#9 extensionRequest 属性值 = SET{Extensions-SEQ}（Go/OpenSSL 事实标准，无 OCTET 包装）；④ PEM 私钥必须标准 base64（非 url）；⑤ CSR 公钥 ≠ 账户公钥 |

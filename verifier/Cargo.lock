@@ -252,6 +252,7 @@ version = "0.1.0"
 dependencies = [
  "hyproto",
  "libc",
+ "ring",
  "rustls",
  "webpki-roots 0.26.11",
 ]

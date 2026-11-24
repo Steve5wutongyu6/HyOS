@@ -17,6 +17,7 @@
 | SELinux (S3+) | enforcing 最小权限：应用锁定 `hyos_app_t` 域（块设备/危险能力/ptrace 编译期 neverallow），仅 `/run/hyos-tmp` 可写，配置只读；策略单块离线合成、构建期嵌入 |
 | 运行期 (S4) | 签名 ack 心跳、epoch 推进、失联即销毁 |
 | DD 部署 | 一机一镜像：目标网络/密钥服务地址经 **签名 manifest** 注入（篡改即销毁），`scripts/build-for-target.sh` 按目标构建+注册+R2 分发；hyinit 经 netlink(onlink) 装默认路由，直连 CF 边缘 IP（Host 头路由） |
+| 证书续期 | 内置 ACME DNS-01 客户端（LE staging 实测通过）：DNS 挑战经密钥服务代理（设备 DK 签名鉴权，永不持有 CF 凭据），证书每签发随机新密钥、仅存 tmpfs；失败回落内置证书 |
 | 传输加密 | 密钥服务通信用 **rustls TLS**（webpki 公共根校验 + CMOS RTC 真实时间），防中间人伪造拒绝导致的强制销毁；本地联调可回退明文 |
 | 应用层 | **真 hysteria2 v2.14.0**（Go 静态）+ hyauth（Rust 认证后端）打包进加密应用包；客户端 obfs+TLS+auth 全链路实测 200（`scripts/build-for-target.sh` 按目标构建） |
 

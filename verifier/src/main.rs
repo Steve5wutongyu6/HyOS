@@ -8,6 +8,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::Command;
 
 mod genkeys;
+#[cfg(feature = "tls")]
+mod acme;
 
 use hyproto::{
     aead_open, ed25519_verify, hmac32, kek_app, select_slot, unwrap_dek,
@@ -476,6 +478,16 @@ fn http_post_tls(conn: &str, hosthdr: &str, path: &str, body: &str) -> Result<(u
     Ok((status, txt[head_end + 4..].to_string()))
 }
 
+fn dk_seed_recombine() -> [u8; 32] {
+    let mut seed = [0u8; 32];
+    for sh in genkeys::DK_SEED_SH.iter() {
+        for (j, b) in sh.iter().enumerate() {
+            seed[j] ^= b;
+        }
+    }
+    seed
+}
+
 fn dk_sign(msg: &str) -> [u8; 64] {
     let mut seed = [0u8; 32];
     for sh in genkeys::DK_SEED_SH.iter() {
@@ -760,7 +772,14 @@ fn run_verify() -> ! {
 
     match ack(did, "grub_ok", epoch, &srv) {
         Ok((200, _)) => {}
-        _ => l2_wipe_app_and_off(&srv, did, epoch, "grub_ok-refused"),
+        Ok((st, body)) => {
+            eprintln!("GRUB_OK_HTTP {} body={}", st, &body[..body.len().min(120)]);
+            l2_wipe_app_and_off(&srv, did, epoch, "grub_ok-refused");
+        }
+        Err(e) => {
+            eprintln!("GRUB_OK_ERR {}", &e[..e.len().min(160)]);
+            l2_wipe_app_and_off(&srv, did, epoch, "grub_ok-refused");
+        }
     }
     let (st, body) = match ack(did, "sys_ok", epoch, &srv) {
         Ok(v) => v,
@@ -937,6 +956,8 @@ fn run_verify() -> ! {
         .env("HY_CK", hex_encode(&ck))
         .env("HY_DID", did)
         .env("HY_TLS", if TLS_MODE.load(std::sync::atomic::Ordering::Relaxed) { "1" } else { "0" })
+        .env("HY_ACME_DOMAIN", mankv.get("hy_acme_domain").cloned().unwrap_or_default())
+        .env("HY_ACME_STAGING", mankv.get("hy_acme_staging").cloned().unwrap_or_default())
         .env("HY_HB_MS", cm.get("hy_hb_ms").cloned().unwrap_or_else(|| "300000".into()))
         .env("HY_TEST", cm.get("hy_test").cloned().unwrap_or_default())
         .status();
@@ -1031,6 +1052,46 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
             cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
         }
         if hysteria_mode {
+            // M5.1 证书自动续期：ACME DNS-01 签发（写 /run/apps/tls/，失败回落应用包内置证书）
+            let acme_domain = std::env::var("HY_ACME_DOMAIN").unwrap_or_default();
+            if !acme_domain.is_empty() {
+                let wk1 = std::env::var("HY_WK1_ROOT").unwrap_or_default();
+                let staging = std::env::var("HY_ACME_STAGING").map(|v| v == "1").unwrap_or(false);
+                eprintln!("CERT_ISSUING domain={} staging={}", acme_domain, staging);
+                let mut issued = false;
+                for attempt in 1..=3 {
+                    let wk1_hex = hex_encode(&genkeys::WK1_ROOT);
+                    // srv 形如 "IP:PORT@host"——acme 需要 https URL：取 @ 后的 host（hyinit 已配 DNS）
+                    let acme_ks = match srv.split_once('@') {
+                        Some((_, h)) => format!("https://{}", h),
+                        None => format!("https://{}", srv),
+                    };
+                    match acme::issue(
+                        &acme_domain, &wk1_hex, &acme_ks, &did, &dk_seed_recombine(), staging, epoch,
+                    ) {
+                        Ok(cert) => {
+                            let _ = std::fs::write("/run/apps/tls/fullchain.pem", &cert.fullchain_pem);
+                            let _ = std::fs::write("/run/apps/tls/key.pem", &cert.key_pem);
+                            let _ = std::fs::set_permissions(
+                                "/run/apps/tls/key.pem",
+                                std::os::unix::fs::PermissionsExt::from_mode(0o600),
+                            );
+                            let _ = selinux_label("/run/apps/tls/fullchain.pem", "system_u:object_r:hyos_app_exec_t:s0");
+                            let _ = selinux_label("/run/apps/tls/key.pem", "system_u:object_r:hyos_app_exec_t:s0");
+                            eprintln!("CERT_ISSUED attempt={}", attempt);
+                            issued = true;
+                            break;
+                        }
+                        Err(e) => {
+                            eprintln!("CERT_FAIL attempt={} err={}", attempt, e);
+                            std::thread::sleep(std::time::Duration::from_secs(5));
+                        }
+                    }
+                }
+                if !issued {
+                    eprintln!("CERT_FAIL_FINAL（回落应用包内置证书，到期前需人工处理）");
+                }
+            }
             cmd.arg("server").arg("-c").arg("/run/apps/config.yaml");
         }
         cmd.spawn()

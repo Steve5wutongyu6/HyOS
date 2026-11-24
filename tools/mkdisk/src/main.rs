@@ -250,6 +250,14 @@ fn main() {
             body.push_str("hy_tls=1
 ");
         }
+        if let Some(i) = args.iter().position(|a| a == "--acme-domain") {
+            body.push_str(&format!("hy_acme_domain={}
+", args[i + 1]));
+        }
+        if args.iter().any(|a| a == "--acme-staging") {
+            body.push_str("hy_acme_staging=1
+");
+        }
         if let Some(v) = getv("--srv-host") {
             body.push_str(&format!("hy_srv_host={}
 ", v));
