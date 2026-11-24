@@ -74,10 +74,12 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          # runner 的 EC2 Ubuntu 镜像源吞吐不稳（实测低至 441 B/s）→ 切 Azure 同骨干源
-          sudo sed -i 's|http://[a-z0-9.-]*archive.ubuntu.com/ubuntu|https://azure.archive.ubuntu.com/ubuntu|g' \
-            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
-          sudo apt-get update -qq
+          # runner 的 Ubuntu 源走 mirror+file 机制（apt-mirrors.txt 指向 EC2 镜像，吞吐实测 441 B/s）
+          # → 三个文件全部重写到 Azure 同骨干源（deb822/classic/mirrors.txt 都覆盖）
+          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/apt-mirrors.txt; do
+            [ -f "$f" ] && sudo sed -i 's|http://[a-z0-9.-]*archive.ubuntu.com/ubuntu|https://azure.archive.ubuntu.com/ubuntu|g' "$f" || true
+          done
+          sudo apt-get update
           sudo apt-get update -qq
           # nodejs/npm 由 setup-node 提供；python3/pip/pkg-config runner 预装；qemu-utils CI 不需要
           # noble 组合全装会在 gcc-i686（依赖 gcc-13-i686，不可装）上炸 → 分两批：
