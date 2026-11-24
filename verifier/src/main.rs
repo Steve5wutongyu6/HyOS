@@ -276,11 +276,16 @@ fn route_add_default_via_ioctl(gw: [u8; 4]) -> i32 {
 fn net_ifup(name: &str, ip: [u8; 4], mask: [u8; 4]) -> bool {
     unsafe {
         let sock = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
-        if sock < 0 { return false; }
+        if sock < 0 {
+            eprintln!("IFSOCK_ERR {} errno={}", name, *libc::__errno_location());
+            return false;
+        }
         let mut ifr: libc::ifreq = std::mem::zeroed();
         let nb = name.as_bytes();
         let n = nb.len().min(15);
-        for i in 0..n { ifr.ifr_name[i] = nb[i] as libc::c_char; }
+        for i in 0..n {
+            ifr.ifr_name[i] = nb[i] as libc::c_char;
+        }
         let sin_of = |ifr: &mut libc::ifreq| -> *mut libc::sockaddr_in {
             &mut ifr.ifr_ifru.ifru_addr as *mut _ as *mut libc::sockaddr_in
         };
@@ -289,19 +294,37 @@ fn net_ifup(name: &str, ip: [u8; 4], mask: [u8; 4]) -> bool {
             (*sin).sin_family = libc::AF_INET as libc::sa_family_t;
             (*sin).sin_port = 0;
             (*sin).sin_addr.s_addr = u32::from_ne_bytes(ip);
-            if libc::ioctl(sock, libc::SIOCSIFADDR, &ifr) < 0 { libc::close(sock); return false; }
+            if libc::ioctl(sock, libc::SIOCSIFADDR, &ifr) < 0 {
+                eprintln!("IFADDR_ERR {} errno={}", name, *libc::__errno_location());
+                libc::close(sock);
+                return false;
+            }
         }
         {
             let sin = sin_of(&mut ifr);
             (*sin).sin_family = libc::AF_INET as libc::sa_family_t;
             (*sin).sin_port = 0;
             (*sin).sin_addr.s_addr = u32::from_ne_bytes(mask);
-            if libc::ioctl(sock, libc::SIOCSIFNETMASK, &ifr) < 0 { libc::close(sock); return false; }
+            if libc::ioctl(sock, libc::SIOCSIFNETMASK, &ifr) < 0 {
+                eprintln!("IFMASK_ERR {} errno={}", name, *libc::__errno_location());
+                libc::close(sock);
+                return false;
+            }
         }
-        if libc::ioctl(sock, libc::SIOCGIFFLAGS, &mut ifr) < 0 { libc::close(sock); return false; }
+        if libc::ioctl(sock, libc::SIOCGIFFLAGS, &mut ifr) < 0 {
+            eprintln!("IFFLAGS_GET_ERR {} errno={}", name, *libc::__errno_location());
+            libc::close(sock);
+            return false;
+        }
         let flags = unsafe { ifr.ifr_ifru.ifru_flags };
-        unsafe { ifr.ifr_ifru.ifru_flags = flags | (libc::IFF_UP as libc::c_short) | (libc::IFF_RUNNING as libc::c_short); }
-        if libc::ioctl(sock, libc::SIOCSIFFLAGS, &mut ifr) < 0 { libc::close(sock); return false; }
+        unsafe {
+            ifr.ifr_ifru.ifru_flags = flags | (libc::IFF_UP as libc::c_short) | (libc::IFF_RUNNING as libc::c_short);
+        }
+        if libc::ioctl(sock, libc::SIOCSIFFLAGS, &mut ifr) < 0 {
+            eprintln!("IFFLAGS_SET_ERR {} errno={}", name, *libc::__errno_location());
+            libc::close(sock);
+            return false;
+        }
         libc::close(sock);
         true
     }
@@ -381,7 +404,14 @@ fn http_post(srv: &str, path: &str, body: &str) -> Result<(u16, String), String>
         }
     }
     use std::net::TcpStream;
-    let mut s = TcpStream::connect(conn).map_err(|e| e.to_string())?;
+    use std::time::Duration;
+    let addr: std::net::SocketAddr = conn
+        .parse()
+        .map_err(|e| format!("bad srv addr: {}", e))?;
+    let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+        .map_err(|e| e.to_string())?;
+    s.set_read_timeout(Some(Duration::from_secs(30))).map_err(|e| e.to_string())?;
+    s.set_write_timeout(Some(Duration::from_secs(15))).map_err(|e| e.to_string())?;
     let req = format!(
         "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
         path, hosthdr, body.len(), body
@@ -407,6 +437,7 @@ fn http_post(srv: &str, path: &str, body: &str) -> Result<(u16, String), String>
 fn http_post_tls(conn: &str, hosthdr: &str, path: &str, body: &str) -> Result<(u16, String), String> {
     use std::io::{Read as TRead, Write as TWrite};
     use std::net::TcpStream;
+    use std::time::Duration;
     use std::sync::Arc;
 
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -419,7 +450,13 @@ fn http_post_tls(conn: &str, hosthdr: &str, path: &str, body: &str) -> Result<(u
         .map_err(|e| format!("sni {}", e))?;
     let tls_conn = rustls::ClientConnection::new(Arc::new(config), server_name)
         .map_err(|e| format!("tlsconn {}", e))?;
-    let mut stream = rustls::StreamOwned::new(tls_conn, TcpStream::connect(conn).map_err(|e| e.to_string())?);
+    let addr: std::net::SocketAddr = conn
+        .parse()
+        .map_err(|e| format!("bad srv addr: {}", e))?;
+    let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(10)).map_err(|e| e.to_string())?;
+    tcp.set_read_timeout(Some(Duration::from_secs(30))).map_err(|e| e.to_string())?;
+    tcp.set_write_timeout(Some(Duration::from_secs(15))).map_err(|e| e.to_string())?;
+    let mut stream = rustls::StreamOwned::new(tls_conn, tcp);
     let req = format!(
         "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
         path, hosthdr, body.len(), body
@@ -655,6 +692,12 @@ fn run_verify() -> ! {
     let supervisor_bytes = std::fs::read("/supervisor").unwrap_or_default();
     // 降低内核控制台日志级别：避免 printk 与关键判定消息在串口交错，保证可审计性
     let _ = std::fs::write("/proc/sys/kernel/printk", "1 4 1 7");
+    // loopback：hyauth bind 127.0.0.1 依赖（minimal 内核不自动配置 lo）
+    if net_ifup("lo", [127, 0, 0, 1], [255, 0, 0, 0]) {
+        eprintln!("NET UP lo 127.0.0.1/8");
+    } else {
+        eprintln!("NET UP lo FAILED errno={}", unsafe { *libc::__errno_location() });
+    }
     // 目标网络参数：优先签名清单注入（一机一镜像）；缺省回落 QEMU 联调值。
     // 清单在下方 467 行处验签——篡改网络字段会破坏签名触发销毁。
     let mankv = parse_kv(&std::fs::read_to_string("/system.manifest").unwrap_or_default());
@@ -790,6 +833,28 @@ fn run_verify() -> ! {
     if hex_encode(&hyproto::sha256(&hello)) != want {
         l3_wipe(&srv, did, epoch, "entry-hash");
     }
+    // M5：真应用包（hysteria2 + hyauth + 配置 + auth 机密 + TLS 证书），逐文件哈希校验
+    let m5_files: Vec<(&str, &str)> = vec![
+        ("apps/hysteria", "file_hysteria"),
+        ("apps/hyauth", "file_hyauth"),
+        ("apps/config.yaml", "file_config"),
+        ("apps/auth.env", "file_authenv"),
+        ("apps/tls/fullchain.pem", "file_tlscert"),
+        ("apps/tls/key.pem", "file_tlskey"),
+    ];
+    let mut m5: std::collections::BTreeMap<String, Vec<u8>> = std::collections::BTreeMap::new();
+    for (cpio_name, manifest_key) in &m5_files {
+        if let Some(want_hex) = app.get(*manifest_key) {
+            let data = match files.get(*cpio_name) {
+                Some(v) => v.clone(),
+                None => l3_wipe(&srv, did, epoch, "m5-missing"),
+            };
+            if hex_encode(&hyproto::sha256(&data)) != *want_hex {
+                l3_wipe(&srv, did, epoch, "m5-hash");
+            }
+            m5.insert((*cpio_name).to_string(), data);
+        }
+    }
 
     // 7) SELinux：加载策略并强制，应用写入 tmpfs 并标注（失败即拒绝继续）
     if !selinux_setup() {
@@ -803,12 +868,47 @@ fn run_verify() -> ! {
     if !selinux_label("/run/apps/hello", "system_u:object_r:hyos_app_exec_t:s0") {
         eprintln!("SELINUX_LABEL_FAIL app_exec");
     }
+    // M5：应用文件落地 tmpfs（在目录标注前写入，继承 exec_t —— hysteria/hyauth 可执行）
+    if m5.contains_key("apps/hysteria") {
+        let _ = std::fs::write("/run/apps/hysteria", &m5["apps/hysteria"]);
+        let _ = std::fs::set_permissions(
+            "/run/apps/hysteria",
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        );
+        let _ = std::fs::write("/run/apps/hyauth", &m5["apps/hyauth"]);
+        let _ = std::fs::set_permissions(
+            "/run/apps/hyauth",
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        );
+        let _ = std::fs::write("/run/apps/config.yaml", &m5["apps/config.yaml"]);
+        let _ = std::fs::write("/run/apps/auth.env", &m5["apps/auth.env"]);
+        let _ = std::fs::set_permissions(
+            "/run/apps/auth.env",
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        );
+        let _ = std::fs::create_dir_all("/run/apps/tls");
+        let _ = std::fs::write("/run/apps/tls/fullchain.pem", &m5["apps/tls/fullchain.pem"]);
+        let _ = std::fs::write("/run/apps/tls/key.pem", &m5["apps/tls/key.pem"]);
+        let _ = std::fs::set_permissions(
+            "/run/apps/tls/key.pem",
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        );
+        // 写入发生在目录标注前（新文件继承 tmpfs_t），显式标注保证 hysteria 可读（exec_t read 已允许）
+        let _ = selinux_label("/run/apps/config.yaml", "system_u:object_r:hyos_app_exec_t:s0");
+        let _ = selinux_label("/run/apps/auth.env", "system_u:object_r:hyos_app_exec_t:s0");
+        let _ = selinux_label("/run/apps/tls", "system_u:object_r:hyos_app_exec_t:s0");
+        let _ = selinux_label("/run/apps/tls/fullchain.pem", "system_u:object_r:hyos_app_exec_t:s0");
+        let _ = selinux_label("/run/apps/tls/key.pem", "system_u:object_r:hyos_app_exec_t:s0");
+        eprintln!("M5_APP_FILES_WRITTEN");
+    }
     let _ = selinux_label("/run/apps", "system_u:object_r:hyos_app_exec_t:s0");
     let _ = selinux_label("/run/hyos-tmp", "system_u:object_r:hyos_tmp_t:s0");
     let _ = selinux_label("/etc/hysteria", "system_u:object_r:hyos_config_t:s0");
     if let Some(e) = selinux_enforcing() {
         eprintln!("SELINUX_ENFORCE={}", e);
     }
+    // DNS：最小内核无自动 DNS 配置，Go 程序（hysteria2）需要 /etc/resolv.conf
+    let _ = std::fs::write("/etc/resolv.conf", "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");
     // 部署密钥：份额重组 → tmpfs（0600），仅运行期使用
     match materialize_git_key() {
         Some(len) => eprintln!("GITKEY_READY bytes={}", len),
@@ -864,7 +964,39 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
     let test_mode = std::env::var("HY_TEST").unwrap_or_default() == "1";
 
     // 应用 stdout/stderr 置空：避免与 supervisor 的串口标记交错，保持日志可判定
-    let app_path = "/run/apps/hello";
+    // M5：hysteria 模式（应用包含 apps/hysteria 时）主应用切换为 hysteria2
+    let hysteria_mode = std::path::Path::new("/run/apps/hysteria").exists();
+    let app_path = if hysteria_mode {
+        "/run/apps/hysteria"
+    } else {
+        "/run/apps/hello"
+    };
+    if hysteria_mode {
+        // hyauth 先起（127.0.0.1:18080），hysteria 的 HTTP auth 依赖它
+        let auth_env = std::fs::read_to_string("/run/apps/auth.env").unwrap_or_default();
+        let get_env = |k: &str| -> String {
+            auth_env
+                .lines()
+                .find(|l| l.starts_with(&format!("{}=", k)))
+                .map(|l| l[k.len() + 1..].to_string())
+                .unwrap_or_default()
+        };
+        match Command::new("/run/apps/hyauth")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .env("HYSTERIA_AUTH_SECRET", get_env("HYSTERIA_AUTH_SECRET"))
+            .env("HYSTERIA_AUTH_ID", get_env("HYSTERIA_AUTH_ID"))
+            .spawn()
+        {
+            Ok(hc) => eprintln!("HYAUTH_UP pid={}", hc.id()),
+            Err(e) => {
+                eprintln!("HYAUTH_ERR kind={:?} errno={:?}", e.kind(), e.raw_os_error());
+                l3_wipe(&srv, &did, epoch, "spawn-hyauth");
+            }
+        }
+        eprintln!("APP_MODE=hysteria2");
+    }
     // 诊断：确认应用文件存在并暴露 spawn 失败原因
     match std::fs::metadata(app_path) {
         Ok(m) => eprintln!("APP_FILE_OK size={}", m.len()),
@@ -889,12 +1021,20 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
             }
         }
     }
-    let mut child = match Command::new(app_path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
+    // hysteria 模式：stderr 保留串口（诊断阶段；应用日志少且含失败原因）
+    let mut child = match {
+        let mut cmd = Command::new(app_path);
+        cmd.stdin(std::process::Stdio::null());
+        if hysteria_mode {
+            cmd.stdout(std::process::Stdio::inherit()).stderr(std::process::Stdio::inherit());
+        } else {
+            cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        }
+        if hysteria_mode {
+            cmd.arg("server").arg("-c").arg("/run/apps/config.yaml");
+        }
+        cmd.spawn()
+    } {
         Ok(c) => c,
         Err(e) => {
             eprintln!("SPAWN_ERR kind={:?} errno={:?}", e.kind(), e.raw_os_error());
@@ -910,13 +1050,20 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
     // SELinux 证据 1b：立即复检进程存活（排除 pid 复用干扰）
     eprintln!("CHILD_ALIVE0={}", matches!(child.try_wait(), Ok(None)));
     // SELinux 证据 2：在受限域内探测（块设备/配置写应被拒绝，tmpfs 写应成功）
-    match Command::new(app_path).arg("--probe").stdin(std::process::Stdio::null()).output() {
-        Ok(o) => {
+    // hysteria 模式跳过 probe（ hysteria CLI 不识别 --probe）
+    let probe_res = if hysteria_mode {
+        None
+    } else {
+        Some(Command::new(app_path).arg("--probe").stdin(std::process::Stdio::null()).output())
+    };
+    match probe_res {
+        Some(Ok(o)) => {
             for line in String::from_utf8_lossy(&o.stdout).lines() {
                 eprintln!("PROBE {}", line);
             }
         }
-        Err(_) => eprintln!("PROBE spawn-failed"),
+        Some(Err(_)) => eprintln!("PROBE spawn-failed"),
+        None => eprintln!("PROBE skipped (hysteria mode)"),
     }
 
     match ack(&did, "app_ok", epoch, &srv) {
@@ -939,7 +1086,11 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
         Ok(ctx) => eprintln!("SELINUX_APP_DOMAIN2={}", ctx.trim()),
         Err(_) => eprintln!("SELINUX_APP_DOMAIN2=unreadable"),
     }
-    eprintln!("CHILD_ALIVE1={}", matches!(child.try_wait(), Ok(None)));
+    match child.try_wait() {
+        Ok(None) => eprintln!("CHILD_ALIVE1=true"),
+        Ok(Some(s)) => eprintln!("CHILD_DEAD status={:?}", s),
+        Err(e) => eprintln!("CHILD_WAIT_ERR {}", e),
+    }
     loop {
         std::thread::sleep(std::time::Duration::from_millis(hb_ms));
         if let Ok((200, _)) = ack(&did, "alive", epoch, &srv) {
@@ -958,11 +1109,16 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
             }
         }
         if let Ok(Some(_)) = child.try_wait() {
-            child = match Command::new(app_path)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn() {
+            child = match {
+                let mut cmd = Command::new(app_path);
+                cmd.stdin(std::process::Stdio::null());
+                if hysteria_mode {
+                    cmd.stdout(std::process::Stdio::inherit()).stderr(std::process::Stdio::inherit());
+                } else {
+                    cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+                }
+                cmd.spawn()
+            } {
                 Ok(c) => c,
                 Err(_) => l3_wipe(&srv, &did, epoch, "respawn"),
             };

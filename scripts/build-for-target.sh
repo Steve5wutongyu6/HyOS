@@ -41,6 +41,10 @@ done
 [ -n "$NAME" ] && [ -n "$NET_IP" ] && [ -n "$NET_MASK" ] && [ -n "$NET_GW" ] && [ -n "$SRV" ] \
   || { echo "用法: --name/--net-ip/--net-mask/--net-gw/--srv 必填"; exit 2; }
 
+# 9p 缓存：宿主机侧修改的源码/产物必须 flush，否则客机读到陈旧文件（联调缺陷 #11）
+sync
+echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
+
 echo "=== 0. 构建产物检查 ==="
 for f in $B/core/core.img $B/vmlinuz $B/mkdisk $B/hello; do
   [ -s "$f" ] || { echo "缺构建产物 $f —— 先全量构建（bash scripts/build-userland.sh && bash grub/build-grub.sh ...）"; exit 1; }
@@ -70,6 +74,36 @@ bash scripts/build-userland.sh > /tmp/bft-userland.log 2>&1 || { tail -10 /tmp/b
 echo "=== 3b. GRUB 重建（core.img 必须绑定新 VK/WK0，否则清单验签失败即销毁）==="
 bash grub/build-grub.sh > /tmp/bft-grub.log 2>&1 || { tail -8 /tmp/bft-grub.log; exit 1; }
 
+echo "=== 3c. hysteria2 应用（Go 静态交叉，M5）==="
+if [ ! -s "$B/hysteria" ]; then
+  if [ ! -d "$HOME/hysteria-src/.git" ]; then
+    git clone --depth 1 --branch app/v2.14.0 https://github.com/apernet/hysteria.git "$HOME/hysteria-src" \
+      || { echo "hysteria clone fail"; exit 1; }
+  fi
+  export PATH="$PATH:/usr/local/go/bin"
+  export GOPROXY="https://goproxy.cn,direct"
+  (cd "$HOME/hysteria-src/app" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+    go build -trimpath -ldflags "-s -w -X main.appVersion=app/v2.14.0" -o "$B/hysteria" .) \
+    || { echo "hysteria build fail"; exit 1; }
+fi
+
+echo "=== 3d. 渲染生产配置（SOPS 解密机密 + 模板替换）+ 证书 ==="
+export SOPS_AGE_KEY_FILE=/mnt/vmiss/hyos-age-key.txt
+cd /mnt/vmiss/HysteriaConfig
+sops --decrypt --input-type yaml --output-type yaml auth/users.yaml.sops > /tmp/users.dec.yaml \
+  || { echo "sops decrypt fail"; exit 1; }
+python3 /mnt/vmiss/hyos-build/scripts/render-hysteria-config.py
+cp /tmp/app-config.yaml /tmp/bft-app-config.yaml
+cp /tmp/app-auth.env /tmp/bft-app-auth.env
+CERT_SRC=/tmp/tlscerts/opt/docker/nginx-proxy/certs/oa.nanachi.cloud
+if [ -s "$CERT_SRC/fullchain.pem" ]; then
+  cp "$CERT_SRC/fullchain.pem" /tmp/bft-tls-fullchain.pem
+  cp "$CERT_SRC/key.pem" /tmp/bft-tls-key.pem
+fi
+[ -s /tmp/bft-tls-fullchain.pem ] && [ -s /tmp/bft-tls-key.pem ] \
+  || { echo "TLS 证书缺失（先提取到 /tmp/tlscerts/）"; exit 1; }
+cd "$REPO"
+
 echo "=== 4. 清单（注入目标网络参数，签名固化）==="
 TLS_ARGS=""
 if [ "${TLS:-0}" = 1 ]; then
@@ -89,7 +123,10 @@ if [ "${TEST_MODE:-0}" = 1 ]; then
 fi
 $B/mkdisk disk --core $B/core/core.img --vmlinuz $B/vmlinuz --initrd $B/initrd.img \
   --hello $B/hello --keys tests/fixtures/dev-keys.json --grubtree "$HOME/hyos-build-grub/grub-2.12" \
-  --work $B/work-t-$NAME --out "$IMG" $CFG_ARGS
+  --work $B/work-t-$NAME --out "$IMG" $CFG_ARGS \
+  --hysteria $B/hysteria --hyauth $B/hyauth \
+  --app-config /tmp/bft-app-config.yaml --auth-env /tmp/bft-app-auth.env \
+  --tls-cert /tmp/bft-tls-fullchain.pem --tls-key /tmp/bft-tls-key.pem
 SHA=$(sha256sum "$IMG" | awk '{print $1}')
 
 echo "=== 6. 上传 R2 ==="

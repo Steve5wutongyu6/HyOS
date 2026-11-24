@@ -37,8 +37,8 @@ fn json_field(json: &str, key: &str) -> String {
 const P1_START: u64 = 2048;
 const P2_START: u64 = 4096;
 const P3_START: u64 = 36864;
-const P4_START: u64 = 45056;
-const DISK_SECTORS: u64 = 47104; // 23 MiB
+const P4_START: u64 = 136864; // app 分区扩容（hysteria 25MB）后挪
+const DISK_SECTORS: u64 = 137088; // 66.9 MiB（P3 扩至 ~49MB 容纳 hysteria 应用包）
 const SECTOR: u64 = 512;
 const PAYLOAD_OFF: u64 = 8;
 
@@ -283,6 +283,16 @@ fn main() {
     let grubtree = get("--grubtree");
     let work = get("--work");
     let out = get("--out");
+    // 可选应用文件（M5：真 hysteria2 应用包；缺省保持 stubapp-only 兼容）
+    let opt = |name: &str| -> Option<PathBuf> {
+        args.iter().position(|a| a == name).map(|i| PathBuf::from(&args[i + 1]))
+    };
+    let hysteria = opt("--hysteria");
+    let hyauth = opt("--hyauth");
+    let app_config = opt("--app-config");
+    let auth_env = opt("--auth-env");
+    let tls_cert = opt("--tls-cert");
+    let tls_key = opt("--tls-key");
 
     let keys = load_keys(&keys_p);
     std::fs::create_dir_all(&work).ok();
@@ -299,19 +309,73 @@ fn main() {
         app_body.push_str("os_pin=0.1
 ");
     }
-    app_body.push_str("entry=hello
+    if hysteria.is_some() {
+        app_body.push_str("entry=hysteria
 ");
+    } else {
+        app_body.push_str("entry=hello
+");
+    }
     app_body.push_str(&format!("file_hello={}
 ", hex_enc(&sha256(&hello_bytes))));
+    let hysteria_bytes = hysteria.as_ref().map(|p| std::fs::read(p).expect("hysteria bin"));
+    let hyauth_bytes = hyauth.as_ref().map(|p| std::fs::read(p).expect("hyauth bin"));
+    let config_bytes = app_config.as_ref().map(|p| std::fs::read(p).expect("app config"));
+    if let Some(b) = &hysteria_bytes {
+        app_body.push_str(&format!("file_hysteria={}
+", hex_enc(&sha256(b))));
+    }
+    if let Some(b) = &hyauth_bytes {
+        app_body.push_str(&format!("file_hyauth={}
+", hex_enc(&sha256(b))));
+    }
+    if let Some(b) = &config_bytes {
+        app_body.push_str(&format!("file_config={}
+", hex_enc(&sha256(b))));
+    }
+    let authenv_bytes = auth_env.as_ref().map(|p| std::fs::read(p).expect("auth env"));
+    let tlscert_bytes = tls_cert.as_ref().map(|p| std::fs::read(p).expect("tls cert"));
+    let tlskey_bytes = tls_key.as_ref().map(|p| std::fs::read(p).expect("tls key"));
+    if let Some(b) = &authenv_bytes {
+        app_body.push_str(&format!("file_authenv={}
+", hex_enc(&sha256(b))));
+    }
+    if let Some(b) = &tlscert_bytes {
+        app_body.push_str(&format!("file_tlscert={}
+", hex_enc(&sha256(b))));
+    }
+    if let Some(b) = &tlskey_bytes {
+        app_body.push_str(&format!("file_tlskey={}
+", hex_enc(&sha256(b))));
+    }
     let seed = hex(&keys.sig_seed_hex);
     let mut seed32 = [0u8; 32];
     seed32.copy_from_slice(&seed);
     let app_sig = ed25519_sign(&seed32, app_body.as_bytes());
-    let cpio = cpio_newc(&[
+    let mut app_files: Vec<(&str, Vec<u8>)> = vec![
         ("apps/app.manifest", app_body.into_bytes()),
         ("apps/app.manifest.sig", app_sig.to_vec()),
         ("apps/hello", hello_bytes),
-    ]);
+    ];
+    if let Some(b) = &hysteria_bytes {
+        app_files.push(("apps/hysteria", b.clone()));
+    }
+    if let Some(b) = &hyauth_bytes {
+        app_files.push(("apps/hyauth", b.clone()));
+    }
+    if let Some(b) = &config_bytes {
+        app_files.push(("apps/config.yaml", b.clone()));
+    }
+    if let Some(b) = &authenv_bytes {
+        app_files.push(("apps/auth.env", b.clone()));
+    }
+    if let Some(b) = &tlscert_bytes {
+        app_files.push(("apps/tls/fullchain.pem", b.clone()));
+    }
+    if let Some(b) = &tlskey_bytes {
+        app_files.push(("apps/tls/key.pem", b.clone()));
+    }
+    let cpio = cpio_newc(&app_files);
 
     // ---- 载荷加密 ----
     let dek_sys: [u8; 32] = hex(&keys.dek_sys).try_into().unwrap();
@@ -322,7 +386,7 @@ fn main() {
     let app_sha = sha256(&cpio);
     let app_ct = payload_seal(&dek_app, &cpio);
     assert!(sys_ct.len() <= (32760 * 512) as usize, "sys payload too big");
-    assert!(app_ct.len() <= (8184 * 512) as usize, "app payload too big");
+    assert!(app_ct.len() <= (99000 * 512) as usize, "app payload too big");
 
     // ---- 组装镜像 ----
     let mut img = vec![0u8; (DISK_SECTORS * SECTOR) as usize];

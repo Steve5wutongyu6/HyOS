@@ -22,6 +22,11 @@ make -f /usr/share/selinux/devel/Makefile hyos.pp >/tmp/hyospol-build.log 2>&1 |
 
 # 合入基础策略并重建二进制策略（-n 表示不重载内核）
 sudo semodule -s default -n -i "$WORK/hyos.pp" >/dev/null 2>&1 || true
+# 端口标注：模块语言不支持 portcon 语句，经 libsemanage 注入（随 -B 重建进单块策略）
+sudo semanage port -a -t hyos_auth_port_t -p tcp 18080 2>/dev/null \
+  || sudo semanage port -m -t hyos_auth_port_t -p tcp 18080 2>/dev/null || true
+sudo semanage port -a -t hyos_hysteria_port_t -p udp 443 2>/dev/null \
+  || sudo semanage port -m -t hyos_hysteria_port_t -p udp 443 2>/dev/null || true
 sudo semodule -s default -n -B >/dev/null 2>&1 || true
 # 注意：pipefail 下裸 ls 找不到文件会以退出码 2 静默杀掉整个脚本（CI runner 无策略商店时复现）
 POL=$(ls -1 /etc/selinux/default/policy/policy.* 2>/dev/null | sort -V | tail -1 || true)

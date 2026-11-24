@@ -257,3 +257,23 @@ HID/USB/Wireless/Bluetooth/声音/DRM/Framebuffer/RTC/Watchdog/Thermal/I2C/SPI/M
 | 生产级验证 | QEMU 客机 → SLIRP NAT → 公网 → CF 边缘 IP:443 → TLS（SNI=hyos.nanachi.cloud，webpki 根校验，真实时间）→ grub_ok/sys_ok/app_ok/alive 全链路加密 ack → **E2E SUCCESS（Q_EXIT=0）** |
 | 回归 | 明文路径 e2e 9/9 ALL PASS（TLS 改造无副作用）；CI 三 job 全绿 |
 | 注意 | CF 边缘 IP 烘焙进镜像：IP 若退役设备将不可达 → 按设计销毁；运维需定期核验烘焙 IP；CMOS 电池失效同样触发 fail-closed |
+
+### 9.10 M5：真 hysteria2 应用包（2026-11-24 追加）
+
+| 项 | 内容 |
+|---|---|
+| 应用层 | **真 hysteria2 v2.14.0**（Go 静态交叉 25MB）+ **hyauth**（Rust 重写原 hysteria-auth-server.py，1.4MB 静态，监听 127.0.0.1:18080） |
+| 应用包扩容 | P3 app 分区 4.2MB → ~49MB（DISK 23→67MB），mkdisk 支持 --hysteria/--hyauth/--app-config/--auth-env/--tls-cert/--tls-key 多文件打包 + 逐文件哈希清单 |
+| 配置管线 | HysteriaConfig 私有仓库（SOPS+age）→ build-for-target 解密渲染（obfs PSK/auth 机密注入模板）→ 打入 p2 加密应用包（安全边界=DEK2） |
+| 证书 | 沿用现役 ACME 证书（oa.nanachi.cloud，从实测备份提取打包）；到期续期属后续项 |
+| verifier 改造 | lo 配置（hyauth bind 依赖）+ /etc/resolv.conf（Go DNS）+ hysteria 模式 spawn（hysteria server -c config + hyauth 先起）+ 逐文件哈希校验 + netlink 路由 |
+| SELinux | hyauth 端口标注（portcon 模块语言不支持 → build-policy.sh 经 **semanage port** 注入）+ hysteria UDP 443 类型 + name_connect + tty 诊断写 |
+| 传输硬化 | ack 全路径 connect_timeout(10s)/read 30s（网络抖动快速失败进销毁路径，不再挂死） |
+| 端到端验证 | QEMU(SLIRP) → 客户端(obfs+TLS+auth) → **HyOS 内 hysteria2** → SOCKS5 代理 → **www.cloudflare.com HTTP 200**；hyauth ok:true；E2E SUCCESS |
+| DD 就绪度 | 生产参数镜像构建管线全通；待真机 DD（用户确认时机） |
+
+调试要点（对后续同类问题有价值）：
+1. **9p 缓存陷阱复发**：宿主机改源码后客机构建读到陈旧产物 → build-for-target 开头 sync+drop_caches 固化
+2. **test-mode 关机窗口**：E2E SUCCESS 后 2s 断电 → 客户端测试必须用生产 cfg（VM 常驻）
+3. **wrangler/wrangler 日志/串口文件 root 所有权**：sudo rm
+4. **boot 失败后的再引导**：服务端状态机拒绝重复 grub_ok → 必须 OWNER_TOKEN rearm 后再 boot（防回滚设计）

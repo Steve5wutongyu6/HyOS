@@ -19,6 +19,11 @@ role unconfined_r types hyos_app_t;
 type hyos_auth_port_t;
 corenet_port(hyos_auth_port_t)
 
+# hysteria2 QUIC 监听端口（UDP 443；M5）
+type hyos_hysteria_port_t;
+corenet_port(hyos_hysteria_port_t)
+# portcon 由 build-policy.sh 经 semanage port 注入（模块语言不支持 portcon 语句）
+
 type hyos_app_t;
 type hyos_app_exec_t;
 type hyos_config_t;
@@ -80,10 +85,20 @@ allow hyos_app_t hyos_tmp_t:dir { create read write open search add_name remove_
 # 网络
 corenet_udp_bind_generic_node(hyos_app_t)
 corenet_tcp_bind_generic_node(hyos_app_t)
-allow hyos_app_t hyos_auth_port_t:tcp_socket name_bind;
-allow hyos_app_t self:udp_socket { create bind listen read write getattr };
-allow hyos_app_t self:tcp_socket { create bind listen accept read write getattr };
+allow hyos_app_t hyos_auth_port_t:tcp_socket { name_bind name_connect };
+allow hyos_app_t hyos_hysteria_port_t:udp_socket { create bind listen read write getattr setopt };
+allow hyos_app_t self:udp_socket { create bind listen read write getattr setopt };
+allow hyos_app_t self:tcp_socket { create bind listen accept read write getattr setopt };
 corenet_tcp_connect_http_port(hyos_app_t)
+
+# 串口诊断输出（M5 阶段 hysteria stderr inherit 到 ttyS0；收尾前保留）
+require {
+  class chr_file { write append getattr open };
+  type console_device_t;
+  type tty_device_t;
+}
+allow hyos_app_t console_device_t:chr_file { write append getattr open };
+allow hyos_app_t tty_device_t:chr_file { write append getattr open };
 
 # 显式禁止（编译期断言）
 neverallow hyos_app_t fixed_disk_device_t:blk_file *;

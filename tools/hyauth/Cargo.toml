@@ -1,0 +1,16 @@
+[package]
+name = "hyauth"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "hyauth"
+path = "src/main.rs"
+
+[dependencies]
+# 最小 HTTP 服务端：手工解析（无 tokio/hyper，保持静态精简）
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+strip = true
