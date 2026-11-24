@@ -74,13 +74,14 @@ jobs:
         run: |
           sudo apt-get update -qq
           # nodejs/npm 由 setup-node 提供；python3/pip/pkg-config runner 预装；qemu-utils CI 不需要
-          # noble 上 gcc-multilib 与 gcc-i686 组合解析有冲突（逐包可独立安装）→ 直接逐包
-          for p in build-essential gcc-multilib gcc-i686-linux-gnu bison flex bc libssl-dev libelf-dev \
-                   cpio gzip mtools dosfstools xorriso gawk pkg-config \
-                   checkpolicy policycoreutils selinux-policy-dev selinux-policy-default semodule-utils \
-                   autoconf automake autopoint gettext; do
-            sudo apt-get install -y --no-install-recommends "$p" || { echo "BROKEN: $p"; exit 1; }
-          done
+          # noble 组合全装会在 gcc-i686（依赖 gcc-13-i686，不可装）上炸 → 分两批：
+          # 批1 = 除 gcc-i686 全部（单次大解析，一次下载并行解包）；批2 = gcc-i686 单独（实测可装）
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bison flex bc libssl-dev libelf-dev cpio gzip \
+            mtools dosfstools xorriso gawk pkg-config \
+            checkpolicy policycoreutils selinux-policy-dev selinux-policy-default semodule-utils \
+            autoconf automake autopoint gettext gcc-multilib
+          sudo apt-get install -y --no-install-recommends gcc-i686-linux-gnu
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
