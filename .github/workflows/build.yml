@@ -71,6 +71,8 @@ jobs:
             build/grub/grub-*.tar.xz
           key: srcpkgs-k6.14.11-grub2.12
       - name: 构建依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update -qq
           # nodejs/npm 由 setup-node 提供；python3/pip/pkg-config runner 预装；qemu-utils CI 不需要
