@@ -1067,6 +1067,8 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
     } else {
         "/run/apps/hello"
     };
+    let mut proxy_child: Option<std::process::Child> = None;
+    let mut proxy_child_started = false;
     if hysteria_mode {
         // porthop：端口跳跃 DNAT（规则来自签名清单文件；{{IFACE}} 由 hyinit 渲染占位）
         if std::path::Path::new("/run/iptables-restore").exists() && std::path::Path::new("/run/apps/porthop.conf").exists() {
@@ -1094,7 +1096,7 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
                 .stderr(std::process::Stdio::inherit())
                 .spawn()
             {
-                Ok(pc) => eprintln!("HYPROXY_UP pid={}", pc.id()),
+                Ok(pc) => { eprintln!("HYPROXY_UP pid={}", pc.id()); proxy_child = Some(pc); proxy_child_started = true; }
                 Err(e) => eprintln!("HYPROXY_ERR kind={:?} errno={:?}", e.kind(), e.raw_os_error()),
             }
         }
@@ -1257,6 +1259,22 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
         if let Ok((200, _)) = ack(&did, "alive", epoch, &srv) {
             fails = 0;
             oks += 1;
+            // hyproxy watchdog：masquerade 进程崩溃则拉起（非安全路径，不触发销毁）
+            if proxy_child_started {
+                let alive = proxy_child.as_mut().map(|c| c.try_wait().map(|w| w.is_none()).unwrap_or(false)).unwrap_or(false);
+                if !alive {
+                    eprintln!("HYPROXY_DOWN respawn");
+                    match Command::new("/run/apps/hyproxy")
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::inherit())
+                        .spawn()
+                    {
+                        Ok(pc) => { proxy_child = Some(pc); eprintln!("HYPROXY_RESPAWNED pid={}", proxy_child.as_ref().unwrap().id()); }
+                        Err(e) => eprintln!("HYPROXY_RESPAWN_ERR {:?}", e.kind()),
+                    }
+                }
+            }
             if test_mode && oks >= 2 {
                 eprintln!("HYOS E2E SUCCESS");
                 poweroff();
