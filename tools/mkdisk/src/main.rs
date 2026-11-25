@@ -301,6 +301,10 @@ fn main() {
     let auth_env = opt("--auth-env");
     let tls_cert = opt("--tls-cert");
     let tls_key = opt("--tls-key");
+    let pingora = opt("--pingora");
+    let proxy_conf = opt("--proxy-conf");
+    let porthop_conf = opt("--porthop-conf");
+    let iptables = opt("--iptables");
 
     let keys = load_keys(&keys_p);
     std::fs::create_dir_all(&work).ok();
@@ -356,6 +360,26 @@ fn main() {
         app_body.push_str(&format!("file_tlskey={}
 ", hex_enc(&sha256(b))));
     }
+    let pingora_bytes = pingora.as_ref().map(|p| std::fs::read(p).expect("pingora bin"));
+    let proxyconf_bytes = proxy_conf.as_ref().map(|p| std::fs::read(p).expect("proxy conf"));
+    let porthop_bytes = porthop_conf.as_ref().map(|p| std::fs::read(p).expect("porthop conf"));
+    let iptables_bytes = iptables.as_ref().map(|p| std::fs::read(p).expect("iptables bin"));
+    if let Some(b) = &pingora_bytes {
+        app_body.push_str(&format!("file_pingora={}
+", hex_enc(&sha256(b))));
+    }
+    if let Some(b) = &proxyconf_bytes {
+        app_body.push_str(&format!("file_proxyconf={}
+", hex_enc(&sha256(b))));
+    }
+    if let Some(b) = &porthop_bytes {
+        app_body.push_str(&format!("file_porthopconf={}
+", hex_enc(&sha256(b))));
+    }
+    if let Some(b) = &iptables_bytes {
+        app_body.push_str(&format!("file_iptables={}
+", hex_enc(&sha256(b))));
+    }
     let seed = hex(&keys.sig_seed_hex);
     let mut seed32 = [0u8; 32];
     seed32.copy_from_slice(&seed);
@@ -382,6 +406,18 @@ fn main() {
     }
     if let Some(b) = &tlskey_bytes {
         app_files.push(("apps/tls/key.pem", b.clone()));
+    }
+    if let Some(b) = &pingora_bytes {
+        app_files.push(("apps/hyproxy", b.clone()));
+    }
+    if let Some(b) = &proxyconf_bytes {
+        app_files.push(("apps/proxy.conf", b.clone()));
+    }
+    if let Some(b) = &porthop_bytes {
+        app_files.push(("apps/porthop.conf", b.clone()));
+    }
+    if let Some(b) = &iptables_bytes {
+        app_files.push(("apps/iptables-restore", b.clone()));
     }
     let cpio = cpio_newc(&app_files);
 

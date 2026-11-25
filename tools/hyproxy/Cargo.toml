@@ -1,0 +1,8 @@
+[package]
+name = "hyproxy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pingora = { version = "0.9.1", default-features = false, features = ["rustls", "proxy"] }
+async-trait = "0.1"

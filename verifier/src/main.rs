@@ -860,6 +860,10 @@ fn run_verify() -> ! {
         ("apps/auth.env", "file_authenv"),
         ("apps/tls/fullchain.pem", "file_tlscert"),
         ("apps/tls/key.pem", "file_tlskey"),
+        ("apps/hyproxy", "file_pingora"),
+        ("apps/proxy.conf", "file_proxyconf"),
+        ("apps/porthop.conf", "file_porthopconf"),
+        ("apps/iptables-restore", "file_iptables"),
     ];
     let mut m5: std::collections::BTreeMap<String, Vec<u8>> = std::collections::BTreeMap::new();
     for (cpio_name, manifest_key) in &m5_files {
@@ -908,6 +912,30 @@ fn run_verify() -> ! {
         let _ = std::fs::create_dir_all("/run/apps/tls");
         let _ = std::fs::write("/run/apps/tls/fullchain.pem", &m5["apps/tls/fullchain.pem"]);
         let _ = std::fs::write("/run/apps/tls/key.pem", &m5["apps/tls/key.pem"]);
+        if m5.contains_key("apps/hyproxy") {
+            let _ = std::fs::write("/run/apps/hyproxy", &m5["apps/hyproxy"]);
+            let _ = std::fs::set_permissions(
+                "/run/apps/hyproxy",
+                std::os::unix::fs::PermissionsExt::from_mode(0o755),
+            );
+            let _ = selinux_label("/run/apps/hyproxy", "system_u:object_r:hyos_app_exec_t:s0");
+        }
+        if m5.contains_key("apps/proxy.conf") {
+            let _ = std::fs::write("/run/apps/proxy.conf", &m5["apps/proxy.conf"]);
+            let _ = selinux_label("/run/apps/proxy.conf", "system_u:object_r:hyos_app_exec_t:s0");
+        }
+        if m5.contains_key("apps/porthop.conf") {
+            let _ = std::fs::write("/run/apps/porthop.conf", &m5["apps/porthop.conf"]);
+            let _ = selinux_label("/run/apps/porthop.conf", "system_u:object_r:hyos_app_exec_t:s0");
+        }
+        if m5.contains_key("apps/iptables-restore") {
+            let _ = std::fs::write("/run/iptables-restore", &m5["apps/iptables-restore"]);
+            let _ = std::fs::set_permissions(
+                "/run/iptables-restore",
+                std::os::unix::fs::PermissionsExt::from_mode(0o755),
+            );
+            let _ = selinux_label("/run/iptables-restore", "system_u:object_r:hyos_app_exec_t:s0");
+        }
         let _ = std::fs::set_permissions(
             "/run/apps/tls/key.pem",
             std::os::unix::fs::PermissionsExt::from_mode(0o600),
@@ -1040,6 +1068,36 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
         "/run/apps/hello"
     };
     if hysteria_mode {
+        // porthop：端口跳跃 DNAT（规则来自签名清单文件；{{IFACE}} 由 hyinit 渲染占位）
+        if std::path::Path::new("/run/iptables-restore").exists() && std::path::Path::new("/run/apps/porthop.conf").exists() {
+            let rendered = std::fs::read_to_string("/run/apps/porthop.conf").unwrap_or_default()
+                .replace("{{ IFACE }}", "eth0").replace("{{IFACE}}", "eth0");
+            let _ = std::fs::write("/run/porthop.rules", &rendered);
+            let _ = std::fs::set_permissions("/run/porthop.rules", std::os::unix::fs::PermissionsExt::from_mode(0o600));
+            let _ = selinux_label("/run/porthop.rules", "system_u:object_r:hyos_app_exec_t:s0");
+            match Command::new("/run/iptables-restore")
+                .arg("/run/porthop.rules")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+            {
+                Ok(st) if st.success() => eprintln!("PORTHOP_APPLIED"),
+                _ => eprintln!("PORTHOP_FAIL（跳跃端口 20000-30000/40000-60000 将不通，443 主端口不受影响）"),
+            }
+        }
+        // hyproxy（masquerade 反代）：hysteria 之前起，抢 80/443 TCP
+        if std::path::Path::new("/run/apps/hyproxy").exists() {
+            match Command::new("/run/apps/hyproxy")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+            {
+                Ok(pc) => eprintln!("HYPROXY_UP pid={}", pc.id()),
+                Err(e) => eprintln!("HYPROXY_ERR kind={:?} errno={:?}", e.kind(), e.raw_os_error()),
+            }
+        }
         // hyauth 先起（127.0.0.1:18080），hysteria 的 HTTP auth 依赖它
         let auth_env = std::fs::read_to_string("/run/apps/auth.env").unwrap_or_default();
         let get_env = |k: &str| -> String {
@@ -1111,6 +1169,8 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
             #[cfg(not(feature = "tls"))]
             eprintln!("CERT_SKIP（非 TLS 构建，回落内置证书）");
             cmd.arg("server").arg("-c").arg("/run/apps/config.yaml");
+            // 注意：hysteria2 server 子命令无任何 CLI flag，端口只认 config.yaml（渲染期已改 8443）
+            // TCP 443/80 由 hyproxy 占用，UDP 跳跃区间由 porthop DNAT → 8443，互不冲突
         }
         cmd.spawn()
     } {

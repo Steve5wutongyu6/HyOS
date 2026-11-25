@@ -78,6 +78,22 @@ bash scripts/build-userland.sh > /tmp/bft-userland.log 2>&1 || { tail -10 /tmp/b
 echo "=== 3b. GRUB 重建（core.img 必须绑定新 VK/WK0，否则清单验签失败即销毁）==="
 bash grub/build-grub.sh > /tmp/bft-grub.log 2>&1 || { tail -8 /tmp/bft-grub.log; exit 1; }
 
+echo "=== 3c1. hyproxy（Pingora rustls 反代）==="
+if [ ! -s "$B/hyproxy" ]; then
+  cd "$REPO/tools/hyproxy" && CXX=x86_64-linux-gnu-g++-12 CC=x86_64-linux-gnu-gcc cargo build --release --target x86_64-unknown-linux-gnu
+  cp target/x86_64-unknown-linux-gnu/release/hyproxy "$B/hyproxy"
+  cd "$REPO"
+fi
+echo "=== 3c2. iptables-restore（Debian 取件固定）==="
+if [ ! -s "$B/iptables-restore" ]; then
+  mkdir -p /tmp/ipt-extract && apt-get download iptables >/dev/null 2>&1 && \
+    dpkg-deb -x ./iptables_*.deb /tmp/ipt-extract && \
+    cp /tmp/ipt-extract/usr/sbin/iptables-restore "$B/iptables-restore" 2>/dev/null || true
+  if [ ! -s "$B/iptables-restore" ]; then
+    IPTBIN=$(find /tmp/ipt-extract -name 'iptables-restore*' -type f | head -1)
+    [ -n "$IPTBIN" ] && cp "$IPTBIN" "$B/iptables-restore" || echo "WARN: iptables-restore missing, porthop skipped"
+  fi
+fi
 echo "=== 3c. hysteria2 应用（Go 静态交叉，M5）==="
 if [ ! -s "$B/hysteria" ]; then
   if [ ! -d "$HOME/hysteria-src/.git" ]; then
@@ -120,6 +136,12 @@ $B/mkdisk manifest --core $B/core/core.img --keys tests/fixtures/dev-keys.json -
 echo "=== 5. initramfs + 镜像 ==="
 bash scripts/build-initrd.sh > /tmp/bft-initrd.log 2>&1 || { tail -6 /tmp/bft-initrd.log; exit 1; }
 mkdir -p $B/dist
+# EXTRA_ARGS：masquerade 组件（hyproxy/proxy.conf/porthop/iptables-restore）按产物存在与否拼接
+EXTRA_ARGS=""
+if [ -s "$B/hyproxy" ]; then EXTRA_ARGS="--pingora $B/hyproxy"; fi
+if [ -s /tmp/bft-proxy.conf ]; then EXTRA_ARGS="$EXTRA_ARGS --proxy-conf /tmp/bft-proxy.conf"; fi
+if [ -s /tmp/bft-porthop.conf ]; then EXTRA_ARGS="$EXTRA_ARGS --porthop-conf /tmp/bft-porthop.conf"; fi
+if [ -s "$B/iptables-restore" ]; then EXTRA_ARGS="$EXTRA_ARGS --iptables $B/iptables-restore"; fi
 IMG=$B/dist/deploy-$NAME.img
 CFG_ARGS=""
 if [ "${TEST_MODE:-0}" = 1 ]; then
@@ -129,7 +151,7 @@ fi
 $B/mkdisk disk --core $B/core/core.img --vmlinuz $B/vmlinuz --initrd $B/initrd.img \
   --hello $B/hello --keys tests/fixtures/dev-keys.json --grubtree "$HOME/hyos-build-grub/grub-2.12" \
   --work $B/work-t-$NAME --out "$IMG" $CFG_ARGS \
-  --hysteria $B/hysteria --hyauth $B/hyauth \
+  --hysteria $B/hysteria --hyauth $B/hyauth $EXTRA_ARGS \
   --app-config /tmp/bft-app-config.yaml --auth-env /tmp/bft-app-auth.env \
   --tls-cert /tmp/bft-tls-fullchain.pem --tls-key /tmp/bft-tls-key.pem
 SHA=$(sha256sum "$IMG" | awk '{print $1}')

@@ -27,6 +27,10 @@ cp $REPO/verifier/$TGTDIR/hyinit $B/hyinit
 cd $REPO/tools/stubapp && cargo build --release --target $TGT
 cp $REPO/tools/stubapp/$TGTDIR/stubapp $B/hello
 
+# hyproxy：Pingora rustls 反代（masquerade；TLS 证书走 /run/apps/tls，与 hysteria 同源）
+cd $REPO/tools/hyproxy && CXX=x86_64-linux-gnu-g++-12 cargo build --release --target $TGT
+cp $REPO/tools/hyproxy/$TGTDIR/hyproxy $B/hyproxy
+
 HOST_TRIPLE=$(rustc -vV 2>/dev/null | awk '/^host:/ {print $2}')
 if [ "$HOST_TRIPLE" = "$TGT" ]; then
   cd $REPO/tools/mkdisk && cargo build --release --target $TGT
