@@ -969,6 +969,53 @@ fn run_verify() -> ! {
 
 // ---------- supervisor ----------
 
+#[cfg(feature = "tls")]
+fn issue_certs_to_tmpfs(acme_domain: &str, srv: &str, did: &str, dk_seed: &[u8; 32], epoch: u64, staging: bool) -> bool {
+    {
+    }
+    #[cfg(feature = "tls")]
+    {
+    let wk1 = std::env::var("HY_WK1_ROOT").unwrap_or_default();
+    let staging = std::env::var("HY_ACME_STAGING").map(|v| v == "1").unwrap_or(false);
+    eprintln!("CERT_ISSUING domain={} staging={}", acme_domain, staging);
+    let mut issued = false;
+    for attempt in 1..=3 {
+    let wk1_hex = hex_encode(&genkeys::WK1_ROOT);
+    // srv 形如 "IP:PORT@host"——acme 需要 https URL：取 @ 后的 host（hyinit 已配 DNS）
+    let acme_ks = match srv.split_once('@') {
+    Some((_, h)) => format!("https://{}", h),
+    None => format!("https://{}", srv),
+    };
+    match acme::issue(
+    &acme_domain, &wk1_hex, &acme_ks, &did, &dk_seed_recombine(), staging, epoch,
+    ) {
+    Ok(cert) => {
+    let _ = std::fs::write("/run/apps/tls/fullchain.pem", &cert.fullchain_pem);
+    let _ = std::fs::write("/run/apps/tls/key.pem", &cert.key_pem);
+    let _ = std::fs::set_permissions(
+    "/run/apps/tls/key.pem",
+    std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    );
+    let _ = selinux_label("/run/apps/tls/fullchain.pem", "system_u:object_r:hyos_app_exec_t:s0");
+    let _ = selinux_label("/run/apps/tls/key.pem", "system_u:object_r:hyos_app_exec_t:s0");
+    eprintln!("CERT_ISSUED attempt={}", attempt);
+    issued = true;
+    break;
+    }
+    Err(e) => {
+    eprintln!("CERT_FAIL attempt={} err={}", attempt, e);
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+    }
+    }
+    if !issued {
+    eprintln!("CERT_FAIL_FINAL（回落应用包内置证书，到期前需人工处理）");
+    }
+    }
+
+    true
+}
+
 fn run_supervise(epoch: u64, srv: String) -> ! {
     // TLS 标志经环境继承（独立进程，静态变量不共享）
     TLS_MODE.store(std::env::var("HY_TLS").map(|v| v == "1").unwrap_or(false), std::sync::atomic::Ordering::Relaxed);
@@ -1054,51 +1101,15 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
         if hysteria_mode {
             // M5.1 证书自动续期：ACME DNS-01 签发（写 /run/apps/tls/，失败回落应用包内置证书）
             let acme_domain = std::env::var("HY_ACME_DOMAIN").unwrap_or_default();
-            if !acme_domain.is_empty() {
-                #[cfg(not(feature = "tls"))]
-                {
-                    eprintln!("CERT_SKIP（二进制未启用 tls feature；回落内置证书）");
-                }
-                #[cfg(feature = "tls")]
-                {
-                let wk1 = std::env::var("HY_WK1_ROOT").unwrap_or_default();
+            #[cfg(feature = "tls")]
+            {
                 let staging = std::env::var("HY_ACME_STAGING").map(|v| v == "1").unwrap_or(false);
-                eprintln!("CERT_ISSUING domain={} staging={}", acme_domain, staging);
-                let mut issued = false;
-                for attempt in 1..=3 {
-                    let wk1_hex = hex_encode(&genkeys::WK1_ROOT);
-                    // srv 形如 "IP:PORT@host"——acme 需要 https URL：取 @ 后的 host（hyinit 已配 DNS）
-                    let acme_ks = match srv.split_once('@') {
-                        Some((_, h)) => format!("https://{}", h),
-                        None => format!("https://{}", srv),
-                    };
-                    match acme::issue(
-                        &acme_domain, &wk1_hex, &acme_ks, &did, &dk_seed_recombine(), staging, epoch,
-                    ) {
-                        Ok(cert) => {
-                            let _ = std::fs::write("/run/apps/tls/fullchain.pem", &cert.fullchain_pem);
-                            let _ = std::fs::write("/run/apps/tls/key.pem", &cert.key_pem);
-                            let _ = std::fs::set_permissions(
-                                "/run/apps/tls/key.pem",
-                                std::os::unix::fs::PermissionsExt::from_mode(0o600),
-                            );
-                            let _ = selinux_label("/run/apps/tls/fullchain.pem", "system_u:object_r:hyos_app_exec_t:s0");
-                            let _ = selinux_label("/run/apps/tls/key.pem", "system_u:object_r:hyos_app_exec_t:s0");
-                            eprintln!("CERT_ISSUED attempt={}", attempt);
-                            issued = true;
-                            break;
-                        }
-                        Err(e) => {
-                            eprintln!("CERT_FAIL attempt={} err={}", attempt, e);
-                            std::thread::sleep(std::time::Duration::from_secs(5));
-                        }
-                    }
-                }
-                if !issued {
-                    eprintln!("CERT_FAIL_FINAL（回落应用包内置证书，到期前需人工处理）");
-                }
-                }
+                let dk_seed = dk_seed_recombine();
+                let issued = issue_certs_to_tmpfs(&acme_domain, &srv, &did, &dk_seed, epoch, staging);
+                if issued { eprintln!("CERT_ISSUED"); } else { eprintln!("CERT_FAIL_FINAL（回落内置证书）"); }
             }
+            #[cfg(not(feature = "tls"))]
+            eprintln!("CERT_SKIP（非 TLS 构建，回落内置证书）");
             cmd.arg("server").arg("-c").arg("/run/apps/config.yaml");
         }
         cmd.spawn()
@@ -1149,6 +1160,9 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
 
     let mut fails = 0u32;
     let mut oks = 0u32;
+    // 证书运行期轮换：60 天（< LE 90 天有效期）后自动重签 + 热重启 hysteria
+    #[cfg(feature = "tls")]
+    let mut last_renew_attempt = std::time::Instant::now() - std::time::Duration::from_secs(60 * 86400 - 5 * 60); // 启动即视作"刚检查过"（boot 时已签发）
     // SELinux 证据 1c：心跳前复检应用域与存活（app_ok 之后）
     match std::fs::read_to_string(format!("/proc/{}/attr/current", child.id())) {
         Ok(ctx) => eprintln!("SELINUX_APP_DOMAIN2={}", ctx.trim()),
@@ -1161,6 +1175,25 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
     }
     loop {
         std::thread::sleep(std::time::Duration::from_millis(hb_ms));
+        // 证书 60 天轮换检查（每心跳周期检查一次；失败 24h 后重试）
+        #[cfg(feature = "tls")]
+        if hysteria_mode && last_renew_attempt.elapsed() > std::time::Duration::from_secs(86400) {
+            let acme_domain = std::env::var("HY_ACME_DOMAIN").unwrap_or_default();
+            if !acme_domain.is_empty() {
+                let dk_seed = dk_seed_recombine();
+                let ok = issue_certs_to_tmpfs(&acme_domain, &srv, &did, &dk_seed, epoch, std::env::var("HY_ACME_STAGING").map(|v| v == "1").unwrap_or(false));
+                if ok {
+                    eprintln!("CERT_RENEWED runtime");
+                    last_renew_attempt = std::time::Instant::now();
+                    // 热重启 hysteria（现有 respawn 逻辑接管新证书进程）
+                    let _ = child.kill();
+                } else {
+                    last_renew_attempt = std::time::Instant::now() - std::time::Duration::from_secs(86400 - 3600); // 1h 后重试
+                }
+            } else {
+                last_renew_attempt = std::time::Instant::now();
+            }
+        }
         if let Ok((200, _)) = ack(&did, "alive", epoch, &srv) {
             fails = 0;
             oks += 1;
