@@ -25,3 +25,18 @@
 4. ~90s 后查 D1 events：deva7d15dad6d → grub_ok → sys_ok → app_ok → alive
 5. 外部验证：TCP 80/443（hyproxy→nanachi.cloud）；UDP 443/跳跃区间（Shadowrocket）
 6. 撤销旧设备 dev99bd01fc1a
+
+## 运行期 ACME（本轮已补齐，2026-11-26）
+- Worker 机密已设置：`CF_DNS_TOKEN`（**新建最小权限 token：仅 nanachi.cloud 的 DNS:Edit**，未复用账户级 cfat 令牌）、
+  `CF_DNS_ZONE_ID`=`bd13257e9a4fd8951b7a23513539298a`、`ACME_DOMAIN`=`oa.nanachi.cloud`
+- 端到端验证：POST /v1/acme-dns 空体返回 400 bad_request（此前为 501 disabled）→ 通道已启用且白名单生效
+- 设备侧：60 天到期自动重签（DNS-01 经 Worker 代理），签发/续期失败回落内置证书
+
+## 恢复工作（下次继续）
+1. 用户在 VMISS 面板重装 Debian 13
+2. `bash /tmp/deploy-to-vps.sh` 等价流程：
+   - scp `build/dist/deploy-vmiss-gz-01.img`（sha256 6ae35184…a1a7）与 `scripts/deploy-v8.sh` 到 VPS
+   - `bash deploy-v8.sh /tmp/hyos.img /dev/vda 6ae35184abef360adf2ba8f80c40dbfbf39a0be3a6b04a259f9d0215845aa1a7`
+3. ~90 s 后 D1 事件应为：`deva7d15dad6d` provisioned → grub_ok → sys_ok → app_ok（status active）
+4. 外部验证：TCP 80/443 → nanachi.cloud；UDP 443 / 20000-30000 / 40000-60000 → hysteria2(:8443)
+5. 旧设备 `dev99bd01fc1a` 撤销（按用户要求已不再关注）
