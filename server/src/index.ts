@@ -222,10 +222,15 @@ async function handleAck(env: Env, req: Request): Promise<Response> {
   if (!nb || !(await dkVerify(dev.dk_pub, m, sig || "")))
     return jSigned(env, 403, "err:bad_sig", om("err:bad_sig"));
 
-  // 重放防护：同一 (did, nonce) 只能成功消费一次
-  if (!(await consumeNonce(env, did, nb))) {
-    await logEvent(env, did, "ack_replay", epoch, stage);
-    return jSigned(env, 409, "err:replay", om("err:replay"));
+  // 重放防护：同一 (did, nonce) 只能成功消费一次。
+  // 仅对状态推进/安全事件强制；心跳（alive）是幂等遥测，豁免消费——避免旧版确定性 nonce
+  // 固件因重放判定连续失败而触发 L5 清盘（滚动升级兼容）。
+  const EVENT_NO_REPLAY = ["alive"];
+  if (!EVENT_NO_REPLAY.includes(stage)) {
+    if (!(await consumeNonce(env, did, nb))) {
+      await logEvent(env, did, "ack_replay", epoch, stage);
+      return jSigned(env, 409, "err:replay", om("err:replay"));
+    }
   }
 
   await ensureEpoch(env, did, epoch);
