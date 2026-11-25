@@ -152,7 +152,7 @@ fn write_slot_a(img: &mut [u8], base: u64, seq: u64, epoch: u64, pt_sha: [u8; 32
     img[off..off + 512].copy_from_slice(&buf);
 }
 
-fn build_sys_fat(work: &Path, vmlinuz: &Path, initrd: &Path) -> Vec<u8> {
+fn build_sys_fat(work: &Path, vmlinuz: &Path, initrd: &Path, grub_cfg: &Path) -> Vec<u8> {
     let fat = work.join("sysfat.img");
     let _ = std::fs::remove_file(&fat);
     std::fs::write(&fat, vec![0u8; 32704 * 512]).expect("fat size");
@@ -167,6 +167,14 @@ fn build_sys_fat(work: &Path, vmlinuz: &Path, initrd: &Path) -> Vec<u8> {
     ]));
     run(Command::new("mcopy").args([
         "-i", fat.to_str().unwrap(), initrd.to_str().unwrap(), "::/boot/initrd.img",
+    ]));
+    // grub.cfg 随 p2 载荷一起加密（AES-256-GCM）+ 载荷哈希校验：磁盘上不再有明文引导配置
+    // 载荷封印前写入，攻击者无法在不破坏 GCM tag / slot.img 哈希的前提下改动引导参数
+    run(Command::new("mmd").args([
+        "-i", fat.to_str().unwrap(), "::/boot/grub",
+    ]));
+    run(Command::new("mcopy").args([
+        "-i", fat.to_str().unwrap(), grub_cfg.to_str().unwrap(), "::/boot/grub/grub.cfg",
     ]));
     std::fs::read(&fat).expect("sysfat read")
 }
@@ -184,9 +192,8 @@ fn build_p1_fat(work: &Path, grub_cfg: &Path, grub_manifest: &Path) -> Vec<u8> {
     run(Command::new("mmd").args([
         "-i", fat.to_str().unwrap(), "::/boot/grub",
     ]));
-    run(Command::new("mcopy").args([
-        "-i", fat.to_str().unwrap(), grub_cfg.to_str().unwrap(), "::/boot/grub/grub.cfg",
-    ]));
+    // 明文 grub.cfg 不再落 P1（引导配置在加密载荷内，由 GRUB 从 (hyram) 读取）
+    let _ = grub_cfg;
     run(Command::new("mcopy").args([
         "-i", fat.to_str().unwrap(), grub_manifest.to_str().unwrap(), "::/grub.manifest",
     ]));
@@ -257,6 +264,15 @@ fn main() {
         if args.iter().any(|a| a == "--acme-staging") {
             body.push_str("hy_acme_staging=1
 ");
+        }
+        // 安全相关运行开关只能来自签名清单（cmdline 未认证，注入即可关策略/开测试模式）
+        if args.iter().any(|a| a == "--test-mode") {
+            body.push_str("hy_test=1
+");
+        }
+        if let Some(v) = getv("--hb-ms") {
+            body.push_str(&format!("hy_hb_ms={}
+", v));
         }
         if let Some(v) = getv("--srv-host") {
             body.push_str(&format!("hy_srv_host={}
@@ -421,10 +437,16 @@ fn main() {
     }
     let cpio = cpio_newc(&app_files);
 
+    // grub.cfg 源（加密进 p2 载荷；磁盘上不留明文）
+    let cfg = match args.iter().position(|a| a == "--cfg") {
+        Some(i) => PathBuf::from(&args[i + 1]),
+        None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../grub/grub.cfg"),
+    };
+
     // ---- 载荷加密 ----
     let dek_sys: [u8; 32] = hex(&keys.dek_sys).try_into().unwrap();
     let dek_app: [u8; 32] = hex(&keys.dek_app).try_into().unwrap();
-    let sysfat = build_sys_fat(&work, &vmlinuz, &initrd);
+    let sysfat = build_sys_fat(&work, &vmlinuz, &initrd, &cfg);
     let sys_sha = sha256(&sysfat);
     let sys_ct = payload_seal(&dek_sys, &sysfat);
     let app_sha = sha256(&cpio);
@@ -474,11 +496,7 @@ fn main() {
 
     // ---- 写分区内容 ----
     let mut img_mut = img;
-    // p1 fat（含 grub.cfg 与 grub.manifest；manifest 绑定 window_sha）
-    let cfg = match args.iter().position(|a| a == "--cfg") {
-        Some(i) => PathBuf::from(&args[i + 1]),
-        None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../grub/grub.cfg"),
-    };
+    // p1 fat（仅 grub.manifest，绑定 window_sha；grub.cfg 在加密载荷内）
     // p1 grub.manifest：hyverify 自校验用的二进制格式
     // [0..8)="HYGRUB1\0" [8..12)=grub_ver [12..44)=window_sha [44..64)=0 [64..128)=sig(bytes[0..64))
     let mut man = vec![0u8; 64];

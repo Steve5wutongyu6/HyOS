@@ -500,8 +500,27 @@ fn dk_sign(msg: &str) -> [u8; 64] {
     sig
 }
 
+/// 从服务端 JSON 响应中取字符串字段（响应结构固定，避免引入 serde 依赖）
+fn json_field(j: &str, key: &str) -> Option<String> {
+    let pat = format!("\"{}\":\"", key);
+    let i = j.find(&pat)? + pat.len();
+    let rest = &j[i..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// 校验服务端响应签名：固定 SRV 公钥 + 本次一次性随机 nonce（防伪造/防跨次重放）
+fn verify_srv_resp(msg: &str, sig_hex: &str) -> Result<(), String> {
+    let mut sig = [0u8; 64];
+    hex_decode_into(sig_hex, &mut sig).map_err(|_| "resp_sig_hex".to_string())?;
+    hyproto::ed25519_verify(&genkeys::SRV_PUB, msg.as_bytes(), &sig)
+        .map_err(|_| "resp_sig_invalid".to_string())
+}
+
 fn ack(did: &str, stage: &str, epoch: u64, srv: &str) -> Result<(u16, String), String> {
-    let nonce = hyproto::sha256(format!("{}|{}", stage, std::process::id()).as_bytes());
+    // 一次性随机 nonce：PID1 恒为 1，任何确定性构造都会被重放
+    let mut nonce = [0u8; 32];
+    hyproto::fill_random(&mut nonce);
     let nonce_b64 = b64url_encode(&nonce);
     let msg = format!("{}|{}|{}|{}", did, stage, epoch, nonce_b64);
     let sig = dk_sign(&msg);
@@ -510,7 +529,13 @@ fn ack(did: &str, stage: &str, epoch: u64, srv: &str) -> Result<(u16, String), S
         "{{\"did\":\"{}\",\"stage\":\"{}\",\"epoch\":{},\"nonce\":\"{}\",\"sig\":\"{}\"}}",
         did, stage, epoch, nonce_b64, sig_hex
     );
-    http_post(srv, "/v1/ack", &body)
+    let (st, resp) = http_post(srv, "/v1/ack", &body)?;
+    // 响应必须绑定本次 nonce 并由服务端密钥签名；伪造的错误帧不得触发销毁
+    let outcome = json_field(&resp, "outcome").ok_or_else(|| "resp_no_outcome".to_string())?;
+    let rsig = json_field(&resp, "sig").ok_or_else(|| "resp_no_sig".to_string())?;
+    let rmsg = format!("{}|{}|{}|{}|{}", did, stage, epoch, nonce_b64, outcome);
+    verify_srv_resp(&rmsg, &rsig)?;
+    Ok((st, resp))
 }
 
 fn parse_kv(text: &str) -> BTreeMap<String, String> {
@@ -547,6 +572,16 @@ fn l5_wipe_all_and_off() -> ! {
     let mut f = open_disk();
     wipe_sectors(&mut f, P2_START, 2 + 16);
     wipe_sectors(&mut f, P3_START, 2 + 16);
+    poweroff();
+}
+
+/// SELinux 未生效等致命状态：清除两个分区的槽头与载荷头（密钥与磁盘内容），再断电
+fn destroy_all_and_off(srv: &str, did: &str, epoch: u64, tag: &str) -> ! {
+    eprintln!("HYOS DESTROY[{}] wiping p2+p3...", tag);
+    let mut f = open_disk();
+    wipe_sectors(&mut f, P2_START, 2 + 16);
+    wipe_sectors(&mut f, P3_START, 2 + 16);
+    let _ = ack(did, "app_fail", epoch, srv);
     poweroff();
 }
 
@@ -655,15 +690,43 @@ fn selinux_setup() -> bool {
         Err(e) => eprintln!("SELINUX_POLICY_READ_ERR errno={:?}", e.raw_os_error()),
     }
     let _ = std::fs::write("/proc/sys/kernel/printk", "1 4 1 7");
-    // 诊断：cmdline 传 hy_enforce=0 时保持 permissive（默认 enforcing）；permissive 下拒绝仍记录 AVC 但放行
-    let permissive = std::fs::read_to_string("/proc/cmdline")
-        .map(|c| c.contains("hy_enforce=0"))
-        .unwrap_or(false);
-    let _ = std::fs::write("/sys/fs/selinux/enforce", if permissive { "0" } else { "1" });
+    // 生产无 permissive 后门：cmdline 不可信（grub.cfg 曾以明文落在 P1），一律强制 enforcing
+    if !mounted || !loaded {
+        eprintln!("SELINUX_SETUP_FAIL mounted={} loaded={}", mounted, loaded);
+        return false;
+    }
+    // 写入结果不得丢弃：写失败或回读非 "1" 都视为策略未生效（fail-closed，绝不静默 permissive）
+    let wrote = std::fs::write("/sys/fs/selinux/enforce", "1");
+    let readback = std::fs::read_to_string("/sys/fs/selinux/enforce")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if wrote.is_err() || readback != "1" {
+        eprintln!(
+            "SELINUX_ENFORCE_FAIL write_errno={:?} readback={:?}",
+            wrote.err().map(|e| e.raw_os_error()),
+            readback
+        );
+        return false;
+    }
     let _ = std::fs::create_dir_all("/run/apps");
     let _ = std::fs::create_dir_all("/run/hyos-tmp");
-    eprintln!("SELINUX_SETUP mounted={} policy_loaded={}", mounted, loaded);
-    loaded
+    // 目录先标注：此后创建的文件继承 conf_t；可执行文件再逐个显式改为 exec_t（此前漏标，
+    // 应用实际一直跑在初始域，SELinux 从未真正约束过它们）
+    let _ = selinux_label("/run/apps", "system_u:object_r:hyos_app_conf_t:s0");
+    // 最小 initramfs 无 file_contexts：/dev/null 等曾落到 event_device_t，应用无法使用。
+    // 显式重标注为标准设备类型（应用域只被授予这几种基础设备）
+    for (dev, ctx) in [
+        ("/dev/null", "system_u:object_r:null_device_t:s0"),
+        ("/dev/zero", "system_u:object_r:zero_device_t:s0"),
+        ("/dev/urandom", "system_u:object_r:urandom_device_t:s0"),
+        ("/dev/random", "system_u:object_r:random_device_t:s0"),
+    ] {
+        let _ = selinux_label(dev, ctx);
+    }
+    // supervisor 的域转换在 exec 阶段由 type_transition(kernel_t, hyos_init_exec_t)
+    // 完成——PID1 自身保持初始域负责特权引导（挂载/解密/清盘），不做运行中 dyntransition
+    eprintln!("SELINUX_SETUP mounted=1 policy_loaded=1 enforce=1");
+    true
 }
 
 fn selinux_enforcing() -> Option<String> {
@@ -730,11 +793,8 @@ fn run_verify() -> ! {
         }
     }
     let cm = cmdline();
-    let srv = mankv
-        .get("hy_srv")
-        .or_else(|| cm.get("hy_srv"))
-        .cloned()
-        .unwrap_or_else(|| "10.0.2.2:80".into());
+    // 密钥服务地址只认 VK_SIG 签名清单（cmdline 回退可被篡改；缺失即销毁，不回退测试地址）
+    let srv = mankv.get("hy_srv").cloned().unwrap_or_default();
     // TLS 传输开关（签名清单 hy_tls=1；需二进制以 tls feature 编译）
     TLS_MODE.store(mankv.get("hy_tls").map(|v| v == "1").unwrap_or(false), std::sync::atomic::Ordering::Relaxed);
     eprintln!(
@@ -746,6 +806,10 @@ fn run_verify() -> ! {
         }
     );
     let epoch: u64 = cm.get("hy_epoch").and_then(|v| v.parse().ok()).unwrap_or(0);
+    if srv.is_empty() {
+        eprintln!("MANIFEST_NO_SRV");
+        destroy_all_and_off(&srv, genkeys::DID, epoch, "manifest-no-srv");
+    }
     let grub_ver: u64 = cm.get("hy_ver").and_then(|v| v.parse().ok()).unwrap_or(0);
     let attest = cm.get("hy_attest").cloned().unwrap_or_default();
     let img_hex = cm.get("hy_img").cloned().unwrap_or_default();
@@ -805,6 +869,11 @@ fn run_verify() -> ! {
         Ok(v) => v,
         Err(_) => l2_wipe_app_and_off(&srv, did, epoch, "p3-slots"),
     };
+    // epoch 以加密槽头为准：cmdline 的 hy_epoch 仅作交叉校验，不一致即销毁
+    if hdr.epoch != epoch {
+        eprintln!("EPOCH_MISMATCH cmdline={} slot={}", epoch, hdr.epoch);
+        l2_wipe_app_and_off(&srv, did, epoch, "epoch-mismatch");
+    }
     let dek2 = match unwrap_dek(&kek_app(&genkeys::WK1_ROOT, hdr.epoch), hdr.epoch, &wrap) {
         Ok(d) => d,
         Err(_) => l2_wipe_app_and_off(&srv, did, epoch, "dek2"),
@@ -879,9 +948,10 @@ fn run_verify() -> ! {
         }
     }
 
-    // 7) SELinux：加载策略并强制，应用写入 tmpfs 并标注（失败即拒绝继续）
+    // 7) SELinux：加载策略并强制，应用写入 tmpfs 并标注
+    //    未正确加载/未进入 enforcing/未落入受限域 → 立即销毁（清密钥与磁盘内容后断电）
     if !selinux_setup() {
-        l3_wipe(&srv, did, epoch, "selinux-policy");
+        destroy_all_and_off(&srv, did, epoch, "selinux-policy");
     }
     let _ = std::fs::write("/run/apps/hello", &hello);
     let _ = std::fs::set_permissions(
@@ -898,11 +968,13 @@ fn run_verify() -> ! {
             "/run/apps/hysteria",
             std::os::unix::fs::PermissionsExt::from_mode(0o755),
         );
+        let _ = selinux_label("/run/apps/hysteria", "system_u:object_r:hyos_app_exec_t:s0");
         let _ = std::fs::write("/run/apps/hyauth", &m5["apps/hyauth"]);
         let _ = std::fs::set_permissions(
             "/run/apps/hyauth",
             std::os::unix::fs::PermissionsExt::from_mode(0o755),
         );
+        let _ = selinux_label("/run/apps/hyauth", "system_u:object_r:hyos_app_exec_t:s0");
         let _ = std::fs::write("/run/apps/config.yaml", &m5["apps/config.yaml"]);
         let _ = std::fs::write("/run/apps/auth.env", &m5["apps/auth.env"]);
         let _ = std::fs::set_permissions(
@@ -922,11 +994,11 @@ fn run_verify() -> ! {
         }
         if m5.contains_key("apps/proxy.conf") {
             let _ = std::fs::write("/run/apps/proxy.conf", &m5["apps/proxy.conf"]);
-            let _ = selinux_label("/run/apps/proxy.conf", "system_u:object_r:hyos_app_exec_t:s0");
+            let _ = selinux_label("/run/apps/proxy.conf", "system_u:object_r:hyos_app_conf_t:s0");
         }
         if m5.contains_key("apps/porthop.conf") {
             let _ = std::fs::write("/run/apps/porthop.conf", &m5["apps/porthop.conf"]);
-            let _ = selinux_label("/run/apps/porthop.conf", "system_u:object_r:hyos_app_exec_t:s0");
+            let _ = selinux_label("/run/apps/porthop.conf", "system_u:object_r:hyos_app_conf_t:s0");
         }
         if m5.contains_key("apps/iptables-restore") {
             let _ = std::fs::write("/run/iptables-restore", &m5["apps/iptables-restore"]);
@@ -934,28 +1006,36 @@ fn run_verify() -> ! {
                 "/run/iptables-restore",
                 std::os::unix::fs::PermissionsExt::from_mode(0o755),
             );
-            let _ = selinux_label("/run/iptables-restore", "system_u:object_r:hyos_app_exec_t:s0");
+            // iptables 需要 CAP_NET_ADMIN：以 supervisor 域（hyos_init_t）运行，不进应用域
+            let _ = selinux_label("/run/iptables-restore", "system_u:object_r:hyos_init_exec_t:s0");
         }
         let _ = std::fs::set_permissions(
             "/run/apps/tls/key.pem",
             std::os::unix::fs::PermissionsExt::from_mode(0o600),
         );
-        // 写入发生在目录标注前（新文件继承 tmpfs_t），显式标注保证 hysteria 可读（exec_t read 已允许）
-        let _ = selinux_label("/run/apps/config.yaml", "system_u:object_r:hyos_app_exec_t:s0");
-        let _ = selinux_label("/run/apps/auth.env", "system_u:object_r:hyos_app_exec_t:s0");
-        let _ = selinux_label("/run/apps/tls", "system_u:object_r:hyos_app_exec_t:s0");
-        let _ = selinux_label("/run/apps/tls/fullchain.pem", "system_u:object_r:hyos_app_exec_t:s0");
-        let _ = selinux_label("/run/apps/tls/key.pem", "system_u:object_r:hyos_app_exec_t:s0");
+        // 写入发生在目录标注前（新文件继承 tmpfs_t），逐项显式标注：
+        //   hyos_app_conf_t  —— 配置（可读，不可执行）
+        //   hyos_secret_t    —— 认证机密与 TLS 私钥（可读，不可执行；与可执行类型严格分离）
+        let _ = selinux_label("/run/apps/config.yaml", "system_u:object_r:hyos_app_conf_t:s0");
+        let _ = selinux_label("/run/apps/auth.env", "system_u:object_r:hyos_secret_t:s0");
+        let _ = selinux_label("/run/apps/tls", "system_u:object_r:hyos_secret_t:s0");
+        let _ = selinux_label("/run/apps/tls/fullchain.pem", "system_u:object_r:hyos_secret_t:s0");
+        let _ = selinux_label("/run/apps/tls/key.pem", "system_u:object_r:hyos_secret_t:s0");
         eprintln!("M5_APP_FILES_WRITTEN");
     }
-    let _ = selinux_label("/run/apps", "system_u:object_r:hyos_app_exec_t:s0");
+    let _ = selinux_label("/run/apps", "system_u:object_r:hyos_app_conf_t:s0");
     let _ = selinux_label("/run/hyos-tmp", "system_u:object_r:hyos_tmp_t:s0");
-    let _ = selinux_label("/etc/hysteria", "system_u:object_r:hyos_config_t:s0");
+    // /etc/hysteria 已废弃（配置改由 /run/apps 提供，标注见 hyos_app_conf_t / hyos_secret_t）
     if let Some(e) = selinux_enforcing() {
         eprintln!("SELINUX_ENFORCE={}", e);
     }
+    // 网络缓冲上限：hysteria2 需要大收发缓冲（避免授予应用 CAP_NET_ADMIN）
+    let _ = std::fs::write("/proc/sys/net/core/rmem_max", "16777216");
+    let _ = std::fs::write("/proc/sys/net/core/wmem_max", "16777216");
     // DNS：最小内核无自动 DNS 配置，Go 程序（hysteria2）需要 /etc/resolv.conf
     let _ = std::fs::write("/etc/resolv.conf", "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");
+    // 应用需读 DNS 配置：标注为配置类型（root_t 不对应用开放）
+    let _ = selinux_label("/etc/resolv.conf", "system_u:object_r:hyos_app_conf_t:s0");
     // 部署密钥：份额重组 → tmpfs（0600），仅运行期使用
     match materialize_git_key() {
         Some(len) => eprintln!("GITKEY_READY bytes={}", len),
@@ -977,6 +1057,8 @@ fn run_verify() -> ! {
     } else {
         eprintln!("SUPERVISOR_READ_FAIL");
     }
+    // 打开 AVC 审计输出（exec/域转换被拒时留证）
+    let _ = std::fs::write("/proc/sys/kernel/printk", "7 4 1 7");
     let status = Command::new(sup_path)
         .arg("supervise")
         .arg(epoch.to_string())
@@ -986,12 +1068,20 @@ fn run_verify() -> ! {
         .env("HY_TLS", if TLS_MODE.load(std::sync::atomic::Ordering::Relaxed) { "1" } else { "0" })
         .env("HY_ACME_DOMAIN", mankv.get("hy_acme_domain").cloned().unwrap_or_default())
         .env("HY_ACME_STAGING", mankv.get("hy_acme_staging").cloned().unwrap_or_default())
-        .env("HY_HB_MS", cm.get("hy_hb_ms").cloned().unwrap_or_else(|| "300000".into()))
-        .env("HY_TEST", cm.get("hy_test").cloned().unwrap_or_default())
+        // 安全相关开关一律取签名清单，不取未认证 cmdline
+        .env("HY_HB_MS", mankv.get("hy_hb_ms").cloned().unwrap_or_else(|| "300000".into()))
+        .env("HY_TEST", mankv.get("hy_test").cloned().unwrap_or_default())
         .status();
     match status {
         Ok(s) if s.success() => poweroff(),
-        _ => l3_wipe(&srv, did, epoch, "supervisor-failed"),
+        Ok(s) => {
+            eprintln!("SUPERVISOR_EXIT code={:?} signal={:?}", s.code(), std::os::unix::process::ExitStatusExt::signal(&s));
+            l3_wipe(&srv, did, epoch, "supervisor-exit");
+        }
+        Err(e) => {
+            eprintln!("SUPERVISOR_SPAWN_ERR kind={:?} errno={:?}", e.kind(), e.raw_os_error());
+            l3_wipe(&srv, did, epoch, "supervisor-spawn");
+        }
     }
 }
 
@@ -1093,7 +1183,7 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
             match Command::new("/run/apps/hyproxy")
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::null())
                 .spawn()
             {
                 Ok(pc) => { eprintln!("HYPROXY_UP pid={}", pc.id()); proxy_child = Some(pc); proxy_child_started = true; }
@@ -1112,7 +1202,7 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
         match Command::new("/run/apps/hyauth")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::null())
             .env("HYSTERIA_AUTH_SECRET", get_env("HYSTERIA_AUTH_SECRET"))
             .env("HYSTERIA_AUTH_ID", get_env("HYSTERIA_AUTH_ID"))
             .spawn()
@@ -1122,6 +1212,13 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
                 eprintln!("HYAUTH_ERR kind={:?} errno={:?}", e.kind(), e.raw_os_error());
                 l3_wipe(&srv, &did, epoch, "spawn-hyauth");
             }
+        }
+        // 认证机密只经环境变量交付 hyauth：文件用后立即删除，磁盘/内存中不留可被其他应用读取的副本
+        let _ = std::fs::remove_file("/run/apps/auth.env");
+        if std::path::Path::new("/run/apps/auth.env").exists() {
+            eprintln!("AUTHENV_UNLINK_FAIL");
+        } else {
+            eprintln!("AUTHENV_UNLINKED");
         }
         eprintln!("APP_MODE=hysteria2");
     }
@@ -1149,15 +1246,12 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
             }
         }
     }
-    // hysteria 模式：stderr 保留串口（诊断阶段；应用日志少且含失败原因）
+    // 生产：应用不得写控制台（console_device_t/tty_device_t 可写已从策略移除）
+    // 诊断统一由 supervisor（hyos_init_t）输出，应用 stdio 全部置空
     let mut child = match {
         let mut cmd = Command::new(app_path);
         cmd.stdin(std::process::Stdio::null());
-        if hysteria_mode {
-            cmd.stdout(std::process::Stdio::inherit()).stderr(std::process::Stdio::inherit());
-        } else {
-            cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-        }
+        cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
         if hysteria_mode {
             // M5.1 证书自动续期：ACME DNS-01 签发（写 /run/apps/tls/，失败回落应用包内置证书）
             let acme_domain = std::env::var("HY_ACME_DOMAIN").unwrap_or_default();
@@ -1291,11 +1385,7 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
             child = match {
                 let mut cmd = Command::new(app_path);
                 cmd.stdin(std::process::Stdio::null());
-                if hysteria_mode {
-                    cmd.stdout(std::process::Stdio::inherit()).stderr(std::process::Stdio::inherit());
-                } else {
-                    cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-                }
+                cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
                 cmd.spawn()
             } {
                 Ok(c) => c,

@@ -32,3 +32,12 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS config_tokens (
   jti TEXT PRIMARY KEY, did TEXT, commit_hash TEXT, exp INTEGER
 );
+
+-- ack/acme-dns 一次性 nonce 消费记录：主键冲突即重放（配合响应签名绑定 nonce）
+CREATE TABLE IF NOT EXISTS nonces (
+  did TEXT NOT NULL,
+  nonce TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  PRIMARY KEY (did, nonce)
+);
+CREATE INDEX IF NOT EXISTS idx_nonces_ts ON nonces (ts);

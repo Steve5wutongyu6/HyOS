@@ -84,15 +84,22 @@ if [ ! -s "$B/hyproxy" ]; then
   cp target/x86_64-unknown-linux-gnu/release/hyproxy "$B/hyproxy"
   cd "$REPO"
 fi
-echo "=== 3c2. iptables-restore（Debian 取件固定）==="
+echo "=== 3c2. iptables-restore（源码静态交叉编译）==="
 if [ ! -s "$B/iptables-restore" ]; then
-  mkdir -p /tmp/ipt-extract && apt-get download iptables >/dev/null 2>&1 && \
-    dpkg-deb -x ./iptables_*.deb /tmp/ipt-extract && \
-    cp /tmp/ipt-extract/usr/sbin/iptables-restore "$B/iptables-restore" 2>/dev/null || true
-  if [ ! -s "$B/iptables-restore" ]; then
-    IPTBIN=$(find /tmp/ipt-extract -name 'iptables-restore*' -type f | head -1)
-    [ -n "$IPTBIN" ] && cp "$IPTBIN" "$B/iptables-restore" || echo "WARN: iptables-restore missing, porthop skipped"
-  fi
+  mkdir -p /tmp/ipt-src && cd /tmp/ipt-src
+  [ -f iptables-1.8.11.tar.xz ] || curl -sSL -m 120 -o iptables-1.8.11.tar.xz \
+    https://www.netfilter.org/projects/iptables/files/iptables-1.8.11.tar.xz
+  [ -d iptables-1.8.11 ] || tar xf iptables-1.8.11.tar.xz
+  cd iptables-1.8.11
+  [ -f Makefile ] || CC=x86_64-linux-gnu-gcc ./configure --host=x86_64-linux-gnu \
+      --prefix=/tmp/ipstatic --disable-nftables --disable-shared --enable-static \
+      --with-kernel=/usr/x86_64-linux-gnu/include > /tmp/ipt-conf.log 2>&1
+  # libtool 必须用 -all-static 才会真正静态链接（普通 -static 会保留 NEEDED libc）
+  make -j4 LDFLAGS="-all-static" > /tmp/ipt-make.log 2>&1 || { tail -6 /tmp/ipt-make.log; exit 1; }
+  cp iptables/xtables-legacy-multi "$B/iptables-restore"
+  chmod +x "$B/iptables-restore"
+  file "$B/iptables-restore" | grep -q "statically linked" || { echo "iptables-restore 非静态链接"; exit 1; }
+  cd "$REPO"
 fi
 echo "=== 3c. hysteria2 应用（Go 静态交叉，M5）==="
 if [ ! -s "$B/hysteria" ]; then
@@ -131,7 +138,8 @@ if [ "${TLS:-0}" = 1 ]; then
 fi
 $B/mkdisk manifest --core $B/core/core.img --keys tests/fixtures/dev-keys.json --out-dir $B/manifests \
   --net-ip "$NET_IP" --net-mask "$NET_MASK" --net-gw "$NET_GW" --srv "$SRV" --srv-host "$SRV_HOST" $TLS_ARGS \
-  ${ACME_DOMAIN:+--acme-domain "$ACME_DOMAIN"} ${ACME_STAGING:+--acme-staging}
+  ${ACME_DOMAIN:+--acme-domain "$ACME_DOMAIN"} ${ACME_STAGING:+--acme-staging} \
+  ${TEST_MODE:+--test-mode --hb-ms 2000}
 
 echo "=== 5. initramfs + 镜像 ==="
 bash scripts/build-initrd.sh > /tmp/bft-initrd.log 2>&1 || { tail -6 /tmp/bft-initrd.log; exit 1; }

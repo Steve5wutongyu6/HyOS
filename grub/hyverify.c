@@ -430,7 +430,7 @@ static grub_err_t hyverify_boot_cmd (grub_command_t cmd __attribute__((unused)),
   {
     char *cl = grub_malloc (512);
     grub_snprintf (cl, 512,
-                   "console=ttyS0 hy_ver=%d hy_epoch=%llu hy_attest=%s hy_img=%s hy_srv=10.0.2.2:80",
+                   "console=ttyS0 hy_ver=%d hy_epoch=%llu hy_attest=%s hy_img=%s",
                    HY_GRUB_VER, (unsigned long long)slot.epoch, attestb64, imghex);
     grub_env_set ("hy_cmdline", cl);
     grub_free (cl);
@@ -438,6 +438,21 @@ static grub_err_t hyverify_boot_cmd (grub_command_t cmd __attribute__((unused)),
   grub_env_set ("hy_epoch_str", "ok");
   grub_device_close (dev);
   grub_printf ("HYOS BOOT-CHAIN OK epoch=%llu\n", (unsigned long long)slot.epoch);
+
+  /* ===== 6) 从解密后的内存盘执行引导配置 =====
+   * grub.cfg 已随 p2 载荷 AES-256-GCM 加密并通过载荷哈希校验，
+   * 磁盘（P1）上不存在明文副本 → 篡改引导参数必然破坏 GCM tag / 哈希而在此前被销毁。
+   */
+  {
+    char *cfg_args[2];
+    cfg_args[0] = (char *)"(hyram)/boot/grub.cfg";
+    cfg_args[1] = NULL;
+    if (grub_command_execute ("configfile", 1, cfg_args) != GRUB_ERR_NONE)
+      {
+        grub_printf ("HYOS GRUBCFG FAIL: %s\n", grub_errmsg);
+        hy_destroy_and_poweroff ("grubcfg");
+      }
+  }
   return GRUB_ERR_NONE;
 }
 

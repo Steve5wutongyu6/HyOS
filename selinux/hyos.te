@@ -6,102 +6,187 @@ gen_require(`
   type fixed_disk_device_t;
   type unlabeled_t;
   type event_device_t;
+  type null_device_t;
+  type zero_device_t;
+  type urandom_device_t;
+  type random_device_t;
+  type proc_t;
+  type proc_net_t;
+  type sysctl_kernel_t;
+  type root_t;
+  type security_t;
   type tmpfs_t;
+  type console_device_t;
+  type tty_device_t;
   role system_r;
   role unconfined_r;
 ')
 
 # 域转换目标类型必须被父域所在角色授权，否则 security_compute_sid 判定 invalid_context，
 # 内核拒绝转换 → execve EACCES（type=1401 审计事件）
-role system_r types hyos_app_t;
-role unconfined_r types hyos_app_t;
+role system_r types { hyos_app_t hyos_init_t };
+role unconfined_r types { hyos_app_t hyos_init_t };
 
 type hyos_auth_port_t;
 corenet_port(hyos_auth_port_t)
 
-# hysteria2 QUIC 监听端口（UDP 443；M5）
+# hysteria2 QUIC 监听端口（UDP 8443；TCP 443/80 已移交 hyproxy）
 type hyos_hysteria_port_t;
 corenet_port(hyos_hysteria_port_t)
 # portcon 由 build-policy.sh 经 semanage port 注入（模块语言不支持 portcon 语句）
 
-type hyos_app_t;
-type hyos_app_exec_t;
-type hyos_config_t;
-type hyos_tmp_t;
-type hyos_init_exec_t;    # supervisor/验证器可执行文件（tmpfs 上）
-
+# ---- 域 ----
+type hyos_app_t;        # 应用域（hysteria2 / hyauth / hyproxy）
+type hyos_init_t;       # supervisor 域（PID1 策略加载后 dyntransition 进入，权限面显式最小化）
 domain_type(hyos_app_t)
+domain_type(hyos_init_t)
+
+# ---- 文件类型（严格分离：可执行 / 配置 / 机密）----
+type hyos_app_exec_t;   # 仅可执行文件
+type hyos_app_conf_t;   # 配置（可读不可执行）
+type hyos_secret_t;     # 认证机密 / TLS 私钥（可读不可执行）
+type hyos_tmp_t;        # 应用私有可写区
+type hyos_init_exec_t;  # supervisor 可执行文件
+
 files_type(hyos_app_exec_t)
-files_type(hyos_config_t)
+files_type(hyos_app_conf_t)
+files_type(hyos_secret_t)
 files_type(hyos_tmp_t)
 files_type(hyos_init_exec_t)
 
-# 域转换：initramfs 的 PID1 在策略加载前被内核赋予 kernel_t；测试环境可能为 unconfined_t
+# ---- supervisor 域转换：PID1 以初始域完成特权引导，exec supervisor 时转换入 hyos_init_t ----
+# （不使用运行中 dyntransition：procfs attr/current 写路径在最小内核上会让 PID1 段错误）
+type_transition kernel_t hyos_init_exec_t:process hyos_init_t;
+allow kernel_t hyos_init_t:process transition;
+type_transition unconfined_t hyos_init_exec_t:process hyos_init_t;
+allow unconfined_t hyos_init_t:process transition;
+# 入口点：允许 exec 但不给 execute_no_trans（强制走域转换，supervisor 不得留在初始域）
+allow kernel_t hyos_init_exec_t:file { read open execute entrypoint getattr map };
+allow unconfined_t hyos_init_exec_t:file { read open execute entrypoint getattr map };
+
+# 应用域转换（supervisor fork+exec 应用可执行文件）
+type_transition hyos_init_t hyos_app_exec_t:process hyos_app_t;
+allow hyos_init_t hyos_app_t:process { transition getattr signal signull sigkill sigstop noatsecure rlimitinh siginh };
+# 复核子进程域（读 /proc/<pid>/attr/current）
+allow hyos_init_t hyos_app_t:dir { search getattr open read };
+allow hyos_init_t hyos_app_t:file { read open getattr };
+# 兼容旧路径（策略加载前 PID1 直接 exec 应用时）
 type_transition kernel_t hyos_app_exec_t:process hyos_app_t;
-allow kernel_t hyos_app_t:process transition;
-type_transition unconfined_t hyos_app_exec_t:process hyos_app_t;
-allow unconfined_t hyos_app_t:process transition;
+allow kernel_t hyos_app_t:process { transition getattr signal signull sigkill sigstop };
 
-# PID1(kernel_t) 执行 supervisor（initramfs 根文件系统不可标注 → 复制到 tmpfs 后标注）
-allow kernel_t hyos_init_exec_t:file { read open execute execute_no_trans entrypoint getattr map };
-allow kernel_t hyos_app_exec_t:file { read open execute execute_no_trans entrypoint getattr map };
+# ---- supervisor（hyos_init_t）：显式最小权限集 ----
+allow hyos_init_t self:process { fork sigchld signal signull getattr setcurrent getsched setsched transition dyntransition };
+# mount/reboot/清盘所需能力（应用域一律禁止，见文末 neverallow）
+allow hyos_init_t self:capability { sys_admin sys_boot dac_override net_admin net_raw };
+allow hyos_init_t self:fd use;
+allow hyos_init_t self:fifo_file rw_fifo_file_perms;
+allow hyos_init_t self:tcp_socket create_stream_socket_perms;
+allow hyos_init_t self:netlink_route_socket { create bind read write getattr setopt };
+allow hyos_init_t self:udp_socket { create read write getattr setopt };
+allow hyos_init_t self:netlink_netfilter_socket { create read write bind getattr setopt };
+allow hyos_init_t self:rawip_socket { create read write getopt setopt };
+allow hyos_init_t proc_net_t:dir { search getattr };
+allow hyos_init_t proc_net_t:file { read open getattr };
+allow hyos_init_t self:unix_stream_socket create_stream_socket_perms;
+corenet_tcp_connect_http_port(hyos_init_t)
 
-# 入口点与目录遍历
+# 挂载 selinuxfs / tmpfs（/run 与 /sys/fs/selinux 目标目录位于 rootfs）
+allow hyos_init_t root_t:dir { search read write open getattr add_name remove_name create mounton };
+allow hyos_init_t root_t:file { read write open getattr create };
+allow hyos_init_t tmpfs_t:filesystem mount;
+allow hyos_init_t tmpfs_t:dir { create read write open search add_name remove_name getattr setattr mounton relabelfrom relabelto };
+allow hyos_init_t tmpfs_t:file { create read write open getattr setattr append unlink rename lock relabelfrom relabelto };
+allow hyos_init_t security_t:file { read write open getattr };
+
+# /proc（printk、cmdline、self/attr/current）
+allow hyos_init_t proc_t:dir { search read getattr };
+allow hyos_init_t proc_t:file { read write open getattr };
+allow hyos_init_t proc_t:filesystem getattr;
+allow hyos_init_t sysctl_kernel_t:dir { search getattr };
+allow hyos_init_t sysctl_kernel_t:file { read write open getattr };
+
+# 块设备：读载荷 + 销毁时覆写；熵源
+allow hyos_init_t fixed_disk_device_t:blk_file { read write open getattr ioctl };
+allow hyos_init_t event_device_t:chr_file { read write open getattr };
+
+# supervisor 自身诊断输出（唯一允许写控制台的域；应用域见 neverallow）
+# 继承 PID1（初始域）打开的控制台 fd 需要 fd use——仅 supervisor 域，应用域禁止
+allow hyos_init_t kernel_t:fd use;
+allow hyos_init_t console_device_t:chr_file { write append open getattr };
+# initramfs 下 /dev/console 落在 rootfs（root_t）
+allow hyos_init_t root_t:chr_file { read write open getattr };
+
+# 应用文件落地与标注（create + relabelto）
+allow hyos_init_t hyos_app_exec_t:file { create read write open getattr setattr rename unlink relabelto execute entrypoint map };
+allow hyos_init_t hyos_app_exec_t:dir { read open search getattr add_name remove_name write };
+allow hyos_init_t hyos_app_conf_t:file { create read write open getattr setattr rename unlink relabelto };
+allow hyos_init_t hyos_app_conf_t:dir { read open search getattr add_name remove_name write };
+allow hyos_init_t hyos_secret_t:file { create read write open getattr setattr rename unlink relabelto };
+allow hyos_init_t hyos_secret_t:dir { read open search getattr add_name remove_name write };
+allow hyos_init_t hyos_tmp_t:file { create read write open getattr setattr append unlink relabelto };
+allow hyos_init_t hyos_tmp_t:dir { create read write open search add_name remove_name getattr };
+allow hyos_init_t hyos_init_exec_t:file { create read write open execute execute_no_trans getattr setattr relabelto entrypoint map };
+allow hyos_init_t hyos_init_exec_t:dir { read open search getattr };
+
+# ---- 应用域（hyos_app_t）：只做网络服务所需 ----
+# 可执行文件：读 + 执行（无 write，防止自改二进制）
 allow hyos_app_t hyos_app_exec_t:file { read open execute execute_no_trans entrypoint getattr map };
 allow hyos_app_t hyos_app_exec_t:dir { read open search getattr };
-allow kernel_t hyos_app_exec_t:dir { read open search getattr add_name remove_name write };
+# 配置：可读不可执行
+allow hyos_app_t hyos_app_conf_t:file { read open getattr map };
+allow hyos_app_t hyos_app_conf_t:dir { read open search getattr };
+# 机密：可读不可执行（hysteria/hyproxy 必须读取 TLS 私钥才能终结 TLS）
+allow hyos_app_t hyos_secret_t:file { read open getattr map };
+allow hyos_app_t hyos_secret_t:dir { read open search getattr };
 
-# 最小能力集
 allow hyos_app_t self:process { fork sigchld signal signull getattr setcurrent getsched };
-
-# /dev/null 与 fd/管道继承（supervisor spawn 应用、应用 stdio 与探测输出所必需）
-allow kernel_t self:fd use;
-allow kernel_t self:fifo_file { create read write open getattr append };
-allow kernel_t event_device_t:chr_file { read write open getattr };
 allow hyos_app_t self:fd use;
-allow hyos_app_t kernel_t:fd use;
-allow hyos_app_t unconfined_t:fd use;
-allow hyos_app_t kernel_t:fifo_file { write };
-allow hyos_app_t unconfined_t:fifo_file { write };
-allow hyos_app_t event_device_t:chr_file { read write open getattr };
-# tmpfs 挂载根目录遍历（/run 根为 tmpfs_t；应用仅需 search 以进入 /run/hyos-tmp）
-allow hyos_app_t tmpfs_t:dir { search getattr };
-# 子进程退出通知与父域控制（SIGCHLD/kill）
-allow hyos_app_t kernel_t:process sigchld;
-allow hyos_app_t unconfined_t:process sigchld;
-allow kernel_t hyos_app_t:process { getattr signal signull sigkill sigstop };
-allow unconfined_t hyos_app_t:process { getattr signal signull sigkill sigstop };
 allow hyos_app_t self:fifo_file rw_fifo_file_perms;
 allow hyos_app_t self:unix_stream_socket create_stream_socket_perms;
 allow hyos_app_t self:netlink_route_socket r_netlink_socket_perms;
 allow hyos_app_t self:capability { net_bind_service setuid setgid dac_override };
+# 继承的 /dev/null 写占位（stdout/stderr 全部指向 null_device_t）
+allow hyos_app_t null_device_t:chr_file { write read open getattr };
+allow hyos_app_t zero_device_t:chr_file { write read open getattr };
+allow hyos_app_t urandom_device_t:chr_file { read open getattr };
+allow hyos_app_t random_device_t:chr_file { read open getattr };
+allow hyos_app_t tmpfs_t:dir { search getattr };
+# initramfs 根（root_t）只读：/etc/resolv.conf 等；写入与执行被 neverallow 禁
+allow hyos_app_t root_t:file { read open getattr map };
+# 子进程退出通知（父域为 supervisor 域）
+allow hyos_app_t hyos_init_t:process sigchld;
+# 继承 fd 的 use：stdio 与已 mmap 的二进制（不授予 fifo_file，管道写被 neverallow 禁）
+allow hyos_app_t hyos_init_t:fd use;
+allow hyos_app_t unconfined_t:process sigchld;
 
-# 文件：只读配置 + 仅 tmpfs 私有区可写
-allow hyos_app_t hyos_config_t:file { read open getattr map };
-allow hyos_app_t hyos_config_t:dir { read open search getattr };
+# 私有可写区
 allow hyos_app_t hyos_tmp_t:file { create read write open getattr append unlink };
 allow hyos_app_t hyos_tmp_t:dir { create read write open search add_name remove_name getattr };
 
-# 网络
+# 网络：hysteria UDP(8443)、hyproxy TCP(80/443)、hyauth 本地 18080
 corenet_udp_bind_generic_node(hyos_app_t)
 corenet_tcp_bind_generic_node(hyos_app_t)
+corenet_tcp_bind_http_port(hyos_app_t)
 allow hyos_app_t hyos_auth_port_t:tcp_socket { name_bind name_connect };
-allow hyos_app_t hyos_hysteria_port_t:udp_socket { create bind listen read write getattr setopt };
-allow hyos_app_t self:udp_socket { create bind listen read write getattr setopt };
-allow hyos_app_t self:tcp_socket { create bind listen accept read write getattr setopt };
+allow hyos_app_t hyos_hysteria_port_t:udp_socket { create bind name_bind listen read write getattr setopt };
+allow hyos_app_t self:udp_socket { create bind listen read write getattr setopt getopt connect };
+allow hyos_app_t self:tcp_socket { create bind listen accept read write getattr setopt getopt connect };
 corenet_tcp_connect_http_port(hyos_app_t)
 
-# 串口诊断输出（M5 阶段 hysteria stderr inherit 到 ttyS0；收尾前保留）
-require {
-  class chr_file { write append getattr open };
-  type console_device_t;
-  type tty_device_t;
-}
-allow hyos_app_t console_device_t:chr_file { write append getattr open };
-allow hyos_app_t tty_device_t:chr_file { write append getattr open };
-
-# 显式禁止（编译期断言）
+# ---- 编译期断言：权限面收口 ----
+# 机密与配置不得作为可执行入口
+neverallow hyos_app_t root_t:file { write append create unlink rename execute };
+neverallow hyos_app_t hyos_secret_t:file { execute execute_no_trans entrypoint };
+neverallow hyos_app_t hyos_app_conf_t:file { execute execute_no_trans entrypoint };
+# 应用不得触碰 supervisor 的 fd/管道（曾允许 app 写 supervisor 的 fd，属多余权限）
+neverallow hyos_app_t hyos_init_t:fd use;
+neverallow hyos_app_t hyos_init_t:fifo_file *;
+neverallow hyos_app_t kernel_t:fd use;
+neverallow hyos_app_t kernel_t:fifo_file *;
+# 生产：应用不得写控制台/终端（防日志外泄与串口注入）
+neverallow hyos_app_t console_device_t:chr_file *;
+neverallow hyos_app_t tty_device_t:chr_file *;
+neverallow hyos_app_t self:capability { sys_admin sys_module sys_rawio sys_ptrace mknod sys_boot net_admin };
 neverallow hyos_app_t fixed_disk_device_t:blk_file *;
-neverallow hyos_app_t self:capability { sys_admin sys_module sys_rawio sys_ptrace mknod sys_boot };
 neverallow hyos_app_t kernel_t:system module_load;
 neverallow hyos_app_t hyos_app_t:process ptrace;

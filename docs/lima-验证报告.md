@@ -155,7 +155,8 @@ PROBE ETC_WRITE=DENIED(13)      # /etc 写被拒
 APP_OK sealed → ADVANCE OK seq=2 → HYOS E2E SUCCESS
 ```
 
-诊断手段：内核参数 `hy_enforce=0` 可进 permissive 复跑（拒绝仍放行并留痕）；运行期回读文件 xattr 与 `/proc/mounts`；`type=1401 invalid_context` 事件是本轮定位角色授权缺失的关键线索。
+诊断手段：运行期回读文件 xattr 与 `/proc/mounts`；`type=1401 invalid_context` 事件是本轮定位角色授权缺失的关键线索。
+（已移除：`hy_enforce=0` permissive 后门——未认证 cmdline 开关可让策略退化为 permissive，与"宁毁勿漏"相悖。）
 
 ### 8.4 CI 状态
 

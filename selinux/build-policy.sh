@@ -25,6 +25,10 @@ sudo semodule -s default -n -i "$WORK/hyos.pp" >/dev/null 2>&1 || true
 # 端口标注：模块语言不支持 portcon 语句，经 libsemanage 注入（随 -B 重建进单块策略）
 sudo semanage port -a -t hyos_auth_port_t -p tcp 18080 2>/dev/null \
   || sudo semanage port -m -t hyos_auth_port_t -p tcp 18080 2>/dev/null || true
+# hysteria2 直听高位端口 8443（TCP 443/80 由 hyproxy 占用；跳跃区间 DNAT → 8443）
+sudo semanage port -a -t hyos_hysteria_port_t -p udp 8443 2>/dev/null \
+  || sudo semanage port -m -t hyos_hysteria_port_t -p udp 8443 2>/dev/null || true
+# 历史镜像曾用 443，迁移期保留标注避免旧产物被拒（不影响新镜像）
 sudo semanage port -a -t hyos_hysteria_port_t -p udp 443 2>/dev/null \
   || sudo semanage port -m -t hyos_hysteria_port_t -p udp 443 2>/dev/null || true
 sudo semodule -s default -n -B >/dev/null 2>&1 || true
@@ -51,7 +55,7 @@ fi
 
 # ---- 自检 ----
 strings "$OUT/policy" > "$WORK/policy.strings"
-for t in hyos_app_t hyos_app_exec_t hyos_config_t hyos_tmp_t hyos_auth_port_t; do
+for t in hyos_app_t hyos_app_exec_t hyos_app_conf_t hyos_secret_t hyos_tmp_t hyos_init_t hyos_init_exec_t hyos_auth_port_t hyos_hysteria_port_t; do
   grep -qx "$t" "$WORK/policy.strings" || { echo "policy missing type: $t"; exit 1; }
 done
 echo "SELINUX_POLICY_OK bytes=$(stat -c %s "$OUT/policy")"

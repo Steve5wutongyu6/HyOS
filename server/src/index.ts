@@ -96,6 +96,33 @@ function j(resp: unknown, status = 200) {
   return new Response(JSON.stringify(resp), { status, headers: { "content-type": "application/json" } });
 }
 
+// ---------- 响应鉴权与重放防护 ----------
+// 设备侧固定服务端公钥校验签名；outcome 绑定请求一次性 nonce，跨次重放无效。
+async function signOutcome(env: Env, msg: string): Promise<string> {
+  const k = await srvSignKey(env);
+  const sig = new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, k, enc.encode(msg) as unknown as BufferSource));
+  return hex(sig);
+}
+
+/// 返回带签名的应答：outcome 为单令牌（ok|state|event:xxx|err:xxx），msg 与设备侧拼装一致
+async function jSigned(env: Env, status: number, outcome: string, msg: string, extra: Record<string, unknown> = {}) {
+  const sig = await signOutcome(env, msg);
+  return j({ ...extra, outcome, sig }, status);
+}
+
+/// 一次性 nonce 消费：重复即重放（返回 false）
+async function consumeNonce(env: Env, did: string, nonce: string): Promise<boolean> {
+  const r = await env.DB.prepare(
+    "INSERT INTO nonces (did, nonce, ts) VALUES (?1,?2,?3) ON CONFLICT(did,nonce) DO NOTHING"
+  ).bind(did, nonce, Date.now()).run();
+  const changed = (r as any)?.meta?.changes ?? 0;
+  // 机会式清理：保留 7 天内 nonce
+  if (Math.random() < 0.02) {
+    await env.DB.prepare("DELETE FROM nonces WHERE ts < ?1").bind(Date.now() - 7 * 86400000).run();
+  }
+  return changed > 0;
+}
+
 async function logEvent(env: Env, did: string, stage: string, epoch: number, evidence: string) {
   await env.DB.prepare("INSERT INTO events (did, stage, epoch, ip, ts, evidence) VALUES (?1,?2,?3,?4,?5,?6)")
     .bind(did, stage, epoch, "", Date.now(), evidence).run();
@@ -178,19 +205,33 @@ async function handleChallenge(env: Env, url: URL): Promise<Response> {
 }
 
 // ---------- ack（POST JSON {did, stage, epoch, nonce, sig}） ----------
+// 加固：一次性随机 nonce 消费（防重放）+ 响应 Ed25519 签名（防伪造/非法来源）
 async function handleAck(env: Env, req: Request): Promise<Response> {
   const body = await req.json() as any;
   const { did, stage, epoch, nonce, sig } = body || {};
   if (!did || !stage || !epoch) return j({ error: "bad_request" }, 400);
+  const nb = String(nonce || "");
+  const om = (o: string) => did + "|" + stage + "|" + epoch + "|" + nb + "|" + o;
+
   const dev = await getDevice(env, did);
-  if (!dev) return j({ error: "unknown_device" }, 404);
-  if (dev.status === "revoked" || dev.status === "quarantine") return j({ error: "denied" }, 403);
-  const m = enc.encode(did + "|" + stage + "|" + epoch + "|" + (nonce || ""));
-  if (!(await dkVerify(dev.dk_pub, m, sig || ""))) return j({ error: "bad_sig" }, 403);
+  if (!dev) return jSigned(env, 404, "err:unknown_device", om("err:unknown_device"));
+  if (dev.status === "revoked" || dev.status === "quarantine")
+    return jSigned(env, 403, "err:denied", om("err:denied"), { state: dev.status });
+
+  const m = enc.encode(did + "|" + stage + "|" + epoch + "|" + nb);
+  if (!nb || !(await dkVerify(dev.dk_pub, m, sig || "")))
+    return jSigned(env, 403, "err:bad_sig", om("err:bad_sig"));
+
+  // 重放防护：同一 (did, nonce) 只能成功消费一次
+  if (!(await consumeNonce(env, did, nb))) {
+    await logEvent(env, did, "ack_replay", epoch, stage);
+    return jSigned(env, 409, "err:replay", om("err:replay"));
+  }
+
   await ensureEpoch(env, did, epoch);
   const er = await env.DB.prepare("SELECT * FROM epochs WHERE did=?1 AND epoch=?2").bind(did, epoch).first<Record<string, any>>();
   const la = await lastAcked(env, did);
-  if (epoch < la) return j({ error: "epoch_regression" }, 403);
+  if (epoch < la) return jSigned(env, 403, "err:epoch_regression", om("err:epoch_regression"));
 
   // 事件型 ack（不参与状态机推进）：心跳与安全事件
   const EVENT_ONLY = ["alive", "exec_deny", "grub_bad", "app_fail"];
@@ -199,14 +240,16 @@ async function handleAck(env: Env, req: Request): Promise<Response> {
     if (stage === "grub_bad" || stage === "app_fail") {
       await env.DB.prepare("UPDATE devices SET status='quarantine' WHERE did=?1").bind(did).run();
     }
-    return j({ ok: true, event: stage });
+    return jSigned(env, 200, "event:" + stage, om("event:" + stage), { ok: true, event: stage });
   }
 
   const order = ["pending", "grub_ok", "sys_ok", "app_ok", "sealed"];
   const curIdx = order.indexOf(er.state as string);
   const next = stage; // grub_ok|sys_ok|app_ok
-  if (!order.slice(0, 4).includes(next)) return j({ error: "bad_stage" }, 400);
-  if (order.indexOf(next) !== curIdx + 1) return j({ error: "bad_transition", state: er.state }, 409);
+  if (!order.slice(0, 4).includes(next))
+    return jSigned(env, 400, "err:bad_stage", om("err:bad_stage"));
+  if (order.indexOf(next) !== curIdx + 1)
+    return jSigned(env, 409, "err:bad_transition", om("err:bad_transition"), { state: er.state });
 
   const ckHex = hex(await sha256(concat(unhex(dev.wk0_root), unhex(dev.wk1_root), new Uint8Array([epoch & 0xff]))));
   let extra: Record<string, string> = { ck: ckHex };
@@ -244,7 +287,7 @@ async function handleAck(env: Env, req: Request): Promise<Response> {
     await env.DB.prepare("UPDATE epochs SET state=?3 WHERE did=?1 AND epoch=?2").bind(did, epoch, next).run();
   }
   await logEvent(env, did, stage, epoch, "ok");
-  return j({ ok: true, state: newState, ...extra });
+  return jSigned(env, 200, "state:" + newState, om("state:" + newState), { ok: true, state: newState, ...extra });
 }
 
 // ---------- enroll（CI 令牌，构建流水线自动注册） ----------
@@ -278,8 +321,13 @@ async function handleAcmeDns(env: Env, req: Request): Promise<Response> {
   if (!did || !epoch || !domain || !token || !action) return j({ error: "bad_request" }, 400);
   if (action !== "set" && action !== "clear") return j({ error: "bad_action" }, 400);
   // 域名白名单：设备只能为本机绑定的 ACME 域名申请验证
+  // 未配置白名单时一律拒绝（空列表 ≠ 允许任意域名；短路放行会造成任意域名 DNS-01 代理）
   const allowed = (env.ACME_DOMAIN || "").split(",").map((x: string) => x.trim()).filter(Boolean);
-  if (allowed.length && !allowed.includes(domain)) {
+  if (allowed.length === 0) {
+    await logEvent(env, did, "acme_dns_denied", epoch, "no_allowlist");
+    return j({ error: "acme_allowlist_unset" }, 403);
+  }
+  if (!allowed.includes(domain)) {
     await logEvent(env, did, "acme_dns_denied", epoch, "domain=" + domain);
     return j({ error: "domain_not_allowed" }, 403);
   }
@@ -292,6 +340,12 @@ async function handleAcmeDns(env: Env, req: Request): Promise<Response> {
   if (!(await dkVerify(dev.dk_pub, m, b.sig || ""))) {
     await logEvent(env, did, "acme_dns_denied", epoch, "bad_sig");
     return j({ error: "bad_sig" }, 403);
+  }
+  // 一次性 nonce：防重放（同一 DNS-01 写/删请求不可被重投）
+  const aom = (o: string) => did + "|acme_dns|" + epoch + "|" + nonceB64 + "|" + o;
+  if (!(await consumeNonce(env, did, nonceB64))) {
+    await logEvent(env, did, "acme_dns_denied", epoch, "replay");
+    return jSigned(env, 409, "err:replay", aom("err:replay"));
   }
   const recName = "_acme-challenge." + domain;
   const zq = "https://api.cloudflare.com/client/v4/zones/" + env.CF_DNS_ZONE_ID + "/dns_records?name=" + encodeURIComponent(recName) + "&type=TXT";
@@ -315,7 +369,7 @@ async function handleAcmeDns(env: Env, req: Request): Promise<Response> {
     }
   }
   await logEvent(env, did, "acme_dns_" + action, epoch, domain);
-  return j({ ok: true, action, domain });
+  return jSigned(env, 200, "ok:" + action, aom("ok:" + action), { ok: true, action, domain });
 }
 
 // ---------- owner：revoke / quarantine-clear / rearm / policy ----------

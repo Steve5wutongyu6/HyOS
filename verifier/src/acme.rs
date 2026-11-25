@@ -460,7 +460,10 @@ pub fn issue(
     let dns_val = b64u(&hyproto::sha256(keyauthz.as_bytes()));
 
     // 7) 密钥服务代理写 TXT（DK 签名鉴权，同 ack 信任模型）
-    let nonce_b64 = b64u(&hyproto::sha256(format!("{}|{}|{}", did, epoch, dns_val).as_bytes()));
+    // 一次性随机 nonce（确定性构造可被重放；服务端按 (did,nonce) 单次消费）
+    let mut nonce_raw = [0u8; 32];
+    hyproto::fill_random(&mut nonce_raw);
+    let nonce_b64 = b64u(&nonce_raw);
     let sig_msg = format!("{}|acme_dns|{}|{}|{}|{}", did, epoch, nonce_b64, domain, dns_val);
     let sig = hyproto::ed25519_sign(dk_seed, sig_msg.as_bytes());
     let sig_hex = hex_dec(&{
@@ -481,6 +484,20 @@ pub fn issue(
         &(ks.clone() + "/v1/acme-dns"), "POST", Some(&set_body), "application/json",
     )?;
     if st != 200 { return Err(format!("acme-dns set http {} {}", st, set_resp)); }
+    // 应答必须由服务端密钥签名并绑定本次 nonce（防伪造/重放）
+    {
+        let outcome = json_str(&set_resp, "outcome").ok_or("acme resp no outcome")?;
+        let rsig = json_str(&set_resp, "sig").ok_or("acme resp no sig")?;
+        let rmsg = format!("{}|acme_dns|{}|{}|{}", did, epoch, nonce_b64, outcome);
+        let sigb = hex_dec(&rsig)?;
+        if sigb.len() != 64 {
+            return Err("acme resp sig len".into());
+        }
+        let siga: [u8; 64] = sigb.as_slice().try_into().map_err(|_| "acme resp sig conv")?;
+        if hyproto::ed25519_verify(&crate::genkeys::SRV_PUB, rmsg.as_bytes(), &siga).is_err() {
+            return Err("acme resp sig invalid".into());
+        }
+    }
     eprintln!("ACME_DNS_SET domain={}", domain);
 
     // 8) 应答挑战 + 轮询授权 valid

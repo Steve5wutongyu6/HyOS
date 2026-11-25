@@ -84,6 +84,8 @@ const rs = [
   'pub const DID: &str = "' + fx.did + '";',
   "pub const GRUB_VER: u64 = 1;",
   "pub const VK_SIG: [u8; 32] = " + hx(fx.sig_pub_hex) + ";",
+  "// 服务端响应签名公钥（ack 帧鉴权：非对称，设备侧只持公钥）",
+  "pub const SRV_PUB: [u8; 32] = " + hx(fx.srv_pub_raw_hex) + ";",
   "pub const DK_PUB: [u8; 32] = " + hx(fx.dk_pub_hex) + ";",
   "pub const DK_SEED_SH: [[u8; 32]; 8] = [",
   sharesRust(DK_SEED_HEX),
