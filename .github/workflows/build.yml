@@ -27,6 +27,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: 机密扫描（禁止密钥/凭据入库）
+        run: bash scripts/secret-scan.sh --tree
       - name: 安装 Rust
         run: |
           rustup toolchain install stable --profile minimal

@@ -1,4 +1,4 @@
-# 构建产物
+# ===== 构建产物 =====
 build/
 target/
 node_modules/
@@ -10,29 +10,57 @@ dist/
 *.o
 *.mod
 *.module
+*.tgz
+*.tar.xz
+*.tar.gz
 
-# 本地机密（绝不入库）
-server/.dev.vars
-tests/fixtures/dev-keys.json
-
-# 生成产物（构建期由 scripts/gen-hykeys.mjs 产出，含密钥份额 → 不入库）
-grub/hykeys.h
-verifier/src/genkeys.rs
+# ===== 明文机密（绝不入库）=====
+server/.dev.vars*
+!.dev.vars.example
+!server/.dev.vars.example
+.env
+.env.*
+!.env.example
+*secrets*.env
+*secrets*.txt
+*secret*.env
+*secret*.txt
+!scripts/secret-scan-allow.list
+hyos-prod-secrets*
+secrets*
+age-key*
+hyos-age-key*
+*age-key*.txt
 *.pem
 *.key
+*.p12
+*.pfx
+*.jks
 id_rsa*
-secrets*
+id_ed25519*
+*.pub
+!docs/**/*.pub
 
-# 编辑器/系统
+# ===== 密钥 fixture / 生成产物（含密钥份额）=====
+tests/fixtures/dev-keys.json
+tests/fixtures/*keys*.json
+*-keys.json
+grub/hykeys.h
+verifier/src/genkeys.rs
+server/tests/fixtures/
+!server/tests/fixtures/README.md
+
+# ===== 编辑器/系统 =====
 .DS_Store
 *.swp
 .vscode/
 .idea/
 
-# 运行日志与临时文件
+# ===== 运行日志与临时文件 =====
 *.log
 probe-cache.txt
 testfile*
-# 测试密钥 fixture 一律不入库（由 scripts/gen-dev-keys.mjs 现场生成）
-server/tests/fixtures/
-!server/tests/fixtures/README.md
+*.orig
+*.rej
+
+# 注意：*.sops 是 SOPS 密文，**应当**入库；Cargo.lock 亦应入库，勿忽略
