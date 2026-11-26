@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本文件面向在本仓库工作的自动化代理，集中收录 HyOS 项目的约束性规则、边界声明与补充说明。修改代码、脚本、构建配置或文档之前，请先阅读对应条目。面向人的项目介绍见 README.md。
+本文件面向在本仓库工作的自动化代理，收录约束、边界与排障要点。面向人的介绍见 README.md。
 
 ---
 
@@ -50,6 +50,8 @@ docs/       验证报告等技术文档
 | 证书续期 | 内置 ACME DNS-01 客户端（LE staging 实测通过）：DNS 挑战经密钥服务代理（设备 DK 签名鉴权，设备永不持有 CF 凭据），证书每签发随机新密钥、仅存 tmpfs；失败回落内置证书 |
 | 传输加密 | 密钥服务通信用 **rustls TLS**（webpki 公共根校验 + CMOS RTC 真实时间），防中间人伪造拒绝导致的强制销毁；本地联调可回退明文 |
 | 应用层 | 真 hysteria2 v2.14.0（Go 静态）+ hyauth（Rust 认证后端）打包进加密应用包；客户端 obfs+TLS+auth 全链路实测 200 |
+
+SELinux 类型标注：应用 `hyos_app_exec_t`、supervisor `hyos_init_exec_t`、配置 `hyos_config_t`、应用临时区 `hyos_tmp_t`；域转换 kernel_t --(执行 hyos_app_exec_t)--> hyos_app_t；策略单块离线合成，约 1.7MB，基座策略版本对齐 34→33。
 
 **销毁等级**：L0 GRUB 自毁 / L1 镜像区 / L2 应用包 / L3 应用自毁 / L4 未签名执行(待 IMA 落地) / L5 运行期失联全盘。
 
@@ -134,7 +136,7 @@ dd 部署从写盘到首次启动之间**不允许出现任何需要人工输入
 | 密钥服务 | Cloudflare Worker `hyos-keyserver`，生产地址 https://hyos.nanachi.cloud（custom domain，自动 DNS/证书） |
 | 数据库 | Cloudflare D1 `hyos`（`schema.sql` 已应用） |
 | 制品存储 | R2/S3 私有桶 `hyos-artifacts` |
-| ACME | `oa.nanachi.cloud`（DNS-01 经 Worker `/v1/acme-dns` 代理，DK 签名鉴权）；Worker 机密：`CF_DNS_TOKEN`（仅 nanachi.cloud 的 DNS:Edit 最小权限 token）、`CF_DNS_ZONE_ID`=`bd13257e9a4fd8951b7a23513539298a`、`ACME_DOMAIN`=`oa.nanachi.cloud` |
+| ACME | `oa.nanachi.cloud`（DNS-01 经 Worker `/v1/acme-dns` 代理，DK 签名鉴权）；Worker 机密：`CF_DNS_TOKEN`（仅 nanachi.cloud 的 DNS:Edit 最小权限 token）、`CF_DNS_ZONE_ID`、`ACME_DOMAIN`=`oa.nanachi.cloud` |
 | CI 联动 | GH Actions 变量 `WORKER_URL` + Secret `HYOS_CI_TOKEN` → 构建尾自动 enroll 新设备 |
 
 ### 6.2 Secrets 清单
@@ -163,9 +165,29 @@ dd 部署从写盘到首次启动之间**不允许出现任何需要人工输入
 
 ## 7. 测试与验证现状
 
-- 最近一次全量结果：**9/9 引导场景通过，契约 21/21；SELinux enforcing 模式 E2E SUCCESS**（应用域隔离 + 最小权限探测矩阵，详见 `docs/lima-验证报告.md` §8）。
-- `tests/e2e.sh` 场景覆盖：清场 → 生成设备密钥 → 启动本地 Worker（wrangler dev + 本地 D1）→ Worker 契约测试 → 全量构建（GRUB core.img / hyinit / initrd / 磁盘镜像）→ 9 个引导场景断言（正常启动、epoch 推进、re-arm、L0–L5 销毁）。
-- CI（`.github/workflows/build.yml`）：单元测试 6/6、Worker 契约 21/21；镜像 job 执行内核/GRUB/用户态/SELinux 全量构建并上传制品。
+全量结果：9/9 引导场景通过，契约 21/21，SELinux enforcing 模式 E2E SUCCESS。
+
+`tests/e2e.sh` 流程：清场 → 生成设备密钥 → 启动本地 Worker（wrangler dev + 本地 D1）→ 契约测试 → rearm → 全量构建（GRUB core.img / hyinit / initrd / 磁盘镜像）→ 逐场景 qemu 引导断言串口标记。
+
+| 场景 | 验证目标 | 关键串口证据 |
+|---|---|---|
+| e1 | 正常启动 + epoch 推进 | SELFTEST OK → BOOT-CHAIN OK epoch=1 → GRUB-CHAIN OK → SYS_OK → APP_OK sealed → ADVANCE OK seq=2 → E2E SUCCESS |
+| e7 | 重启用推进后的 epoch | epoch=2 → ADVANCE OK seq=3 |
+| e8 | rearm 后旧磁盘头再启动 | epoch=3 → ADVANCE OK seq=4 |
+| e2 | L0：窗口区篡改 | DESTROY[window-hash] → WIPED |
+| e3 | L1：载荷篡改 | DESTROY[payload-tag] → WIPED |
+| e4 | 设备 revoked → 销毁 | DESTROY[grub_ok-refused] |
+| e5 | L2：系统清单签名破坏 | DESTROY[system-manifest] |
+| e6 | L3：os_pin 不匹配 | DESTROY[os-pin] wiping p3 |
+| e9 | L5：运行期失联 | HB_FAIL 1/2/3 → L5 WIPE |
+
+契约覆盖：enroll / challenge / 信封互操作 / ack 状态机 / 回滚 quarantine / rearm / revoke。
+
+已验证安全属性：GRUB 自校验（内存 + 盘上双测）；双层加密独立触发对应等级销毁；互验环（DK 签名 attestation + 版本/哈希钉扎）；epoch 单调防回滚（服务端只接受 `epoch >= last_acked`，回滚 403 + quarantine）；离线即销毁；署名 ack（grub_ok/sys_ok/app_ok）与事件（alive/exec_deny/grub_bad/app_fail）分离。
+
+产物：`build/core/core.img`、`build/hyinit`、`build/initrd.img`、`build/deploy-*.img`、日志 `build/logs/e*.log` 与 `build/logs/contract.txt`。
+
+CI（`.github/workflows/build.yml`）：单元测试 6/6、Worker 契约 21/21；镜像 job 执行内核/GRUB/用户态/SELinux 全量构建并上传制品。
 
 ---
 
@@ -174,9 +196,7 @@ dd 部署从写盘到首次启动之间**不允许出现任何需要人工输入
 | 文档 | 内容 |
 |---|---|
 | 《HyOS 安全启动与自动销毁设计方案》（工作区根，v1.3） | 总体设计：威胁模型、密钥体系、启动流程、销毁机制、服务端设计 |
-| `docs/lima-验证报告.md` | Lima 联调验证记录（§8 SELinux、§9 内核裁剪/部署注入/TLS/ACME） |
 | `docs/dd-deploy.md` | DD 部署手册（BIOS 云主机） |
-| `DEPLOY-v9g.md` | 生产部署 runbook |
 | 工作区 `HyOS-生产部署记录.md` | 生产设备台账与服务全景 |
 | 工作区 `DD-交接清单.md` | 一次 DD 交接的操作清单 |
 | 工作区 `hysteria2-带宽测量与定时切换报告.md` | 服务端带宽配置与链路排障记录 |
@@ -256,6 +276,22 @@ VMISS 存储层会吞掉 guest 直接 dd 的部分写入——**页缓存回读�
 - 下载授权 token 为精确匹配：手动复制漏掉末字符会得到 403，授权验证用程序化比对才可靠。
 - `oa.nanachi.cloud` 是 hy2 节点本身的域名，与 SubStore 无关，不要混入 SubStore 的域名配置。
 
+### 10.7 密码学与协议实现教训
+
+- 自研 SHA-256 填充不得用 memset 覆盖已写入的 `0x80`；自研 GCM 的 GHASH 只作用于密文，方向取错时自测自洽但与 Node/Rust 互操作必失败。
+- HKDF 空盐 = 32 字节全零，不是 1 字节 0x00。
+- tweetnacl 签名私钥布局为 `seed‖pk`。
+- ack 签名编码统一 hex；base64url 与服务端 hex 解析不兼容，全部 403 会误触发销毁。
+- aes-gcm `aead_open` 必须传 `密文‖tag`，剥离 tag 后解密恒失败。
+- mkdisk 的 cpio newc 头：ino 为 8 位十六进制，TRAILER 字段数必须精确，否则归档非法。
+- 服务端必须把 `alive` 作为事件型 ack 单独处理；当非法 stage 返回 400 会让验证器误判失联并触发 L5。
+
+### 10.8 SELinux 排障
+
+- type_transition 目标类型必须授权给父角色（`role system_r types hyos_app_t;`），否则 execve EACCES；`type=1401 security_compute_sid invalid_context` 事件是定位关键线索，基座 dontaudit 会掩蔽 avc。
+- 应用域需显式 allow：`event_device_t`、fd use、fifo_file write、sigchld、getsched，应用 stdin 一并置空。
+- tmpfs 挂载根 `/run` 为 `tmpfs_t`，需 `allow hyos_app_t tmpfs_t:dir { search getattr }` 才能进入 `/run/hyos-tmp`。
+
 ---
 
 ## 11. 已知限制与未实现项
@@ -264,6 +300,11 @@ VMISS 存储层会吞掉 guest 直接 dd 的部分写入——**页缓存回读�
 - CF 边缘 IP 烘焙进镜像：CF 更换解析 IP 时需重建镜像；长期方案是 hyinit 内置 DoH 或多 IP 轮询。
 - 未实现项：内核 IMA appraisal + eBPF LSM（执行前验签、拒绝即删，M3）；白盒化"微型 VM 重组 + 控制流平坦化"（当前仅 XOR 8 份额，加固项）；prod 变体裁剪断言（M4）。L4（未签名执行）待 IMA 落地后验证。
 - GRUB 取钥为**离线槽解密**（BIOS 下 GRUB 无原生网卡驱动，`e1000.mod` 不存在，仅 PXE 栈可用）；防回滚由验证器 ack 阶段的服务端校验 + L5 兜底承担；`/v1/boot/challenge` 在 BIOS 变体中为可选（EFI 变体或增加网卡驱动后可恢复在线取钥）。
+- 网络默认路由用 netlink ONLINK（RTM_NEWROUTE + RTNH_F_ONLINK + RTA_OIF，ifindex 取自 sysfs）：SIOCADDRT 在裁剪内核上网关 fib_lookup 失败（ENETUNREACH），netlink 分支无此依赖。
+- TLS：rustls 0.23（ring 后端静态链接）+ webpki-roots；证书校验依赖 CMOS RTC 真实时间（内核启用 RTC_CLASS/HCTOSYS/RTC_DRV_CMOS）；feature tls 仅生产构建启用，本地 QEMU 联调走明文；hyinit 静态体积 1.6→2.84MB。
+- 应用包：hysteria2 v2.14.0（Go 静态）+ hyauth（Rust，监听 127.0.0.1:18080）；P3 分区约 49MB，mkdisk 多文件打包 + 逐文件哈希清单；ack 全路径 connect_timeout 10s / read 30s，网络抖动快速失败进销毁路径。
+- ACME 客户端在 verifier/src/acme.rs：ACME v2（RFC 8555）DNS-01，LE 账户密钥 ES256 JWS，每次签发随机新生成 P-256 证书密钥（≠ 账户密钥），证书与私钥仅存 tmpfs（0600）；staging 全链路实测通过。
+- 性能回归待做：KVM 硬件加速下复测启动时间与 hysteria2 吞吐（现有数据均为 TCG 软件模拟）。
 
 ---
 
