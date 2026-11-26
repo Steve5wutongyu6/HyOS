@@ -136,8 +136,7 @@ cd /mnt/vmiss/HysteriaConfig
 sops --decrypt --input-type yaml --output-type yaml auth/users.yaml.sops > /tmp/users.dec.yaml \
   || { echo "sops decrypt fail"; exit 1; }
 python3 /mnt/vmiss/hyos-build/scripts/render-hysteria-config.py
-cp /tmp/app-config.yaml /tmp/bft-app-config.yaml
-cp /tmp/app-auth.env /tmp/bft-app-auth.env
+# render-hysteria-config.py 直接产出 /tmp/bft-*.{yaml,env,conf}
 CERT_SRC=/tmp/tlscerts/opt/docker/nginx-proxy/certs/oa.nanachi.cloud
 if [ -s "$CERT_SRC/fullchain.pem" ]; then
   cp "$CERT_SRC/fullchain.pem" /tmp/bft-tls-fullchain.pem
@@ -172,6 +171,7 @@ if [ -s /tmp/bft-proxy.conf ]; then EXTRA_ARGS="$EXTRA_ARGS --proxy-conf /tmp/bf
 if [ -s /tmp/bft-porthop.conf ]; then EXTRA_ARGS="$EXTRA_ARGS --porthop-conf /tmp/bft-porthop.conf"; fi
 if [ -s "$B/iptables-restore" ]; then EXTRA_ARGS="$EXTRA_ARGS --iptables $B/iptables-restore"; fi
 if [ -s "$CA_BUNDLE" ]; then EXTRA_ARGS="$EXTRA_ARGS --ca-bundle $CA_BUNDLE"; fi
+if [ -s /tmp/bft-resolv.conf ]; then EXTRA_ARGS="$EXTRA_ARGS --resolv-conf /tmp/bft-resolv.conf"; fi
 IMG=$B/dist/deploy-$NAME.img
 CFG_ARGS=""
 if [ "${TEST_MODE:-0}" = 1 ]; then

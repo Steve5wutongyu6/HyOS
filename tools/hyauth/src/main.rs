@@ -7,8 +7,14 @@ use std::net::TcpListener;
 fn main() {
     let secret = std::env::var("HYSTERIA_AUTH_SECRET").expect("HYSTERIA_AUTH_SECRET");
     let auth_id = std::env::var("HYSTERIA_AUTH_ID").unwrap_or_else(|_| "default".into());
-    let listener = TcpListener::bind("127.0.0.1:18080").expect("bind 18080");
-    eprintln!("HYAUTH_READY 127.0.0.1:18080 id={}", auth_id);
+    // 监听地址来自 HysteriaConfig（auth.listen，经 auth.env → 环境变量），平台侧不内置默认
+    let listen = std::env::var("HYSTERIA_AUTH_LISTEN").unwrap_or_default();
+    if listen.is_empty() {
+        eprintln!("HYAUTH_ERR 缺少 HYSTERIA_AUTH_LISTEN");
+        std::process::exit(2);
+    }
+    let listener = TcpListener::bind(&listen).expect("bind auth listen");
+    eprintln!("HYAUTH_READY {} id={}", listen, auth_id);
     for stream in listener.incoming() {
         let mut s = match stream {
             Ok(s) => s,

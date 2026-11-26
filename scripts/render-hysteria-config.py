@@ -2,47 +2,58 @@ import os
 import re
 import shutil
 
-# 渲染 HysteriaConfig 模板 → HyOS 应用包配置（机密从 SOPS 解密注入）
-# 前置：sops 已解密 users.yaml.sops 到 /tmp/users.dec.yaml；SOPS_AGE_KEY_FILE 已设置
-# 输出：/tmp/app-config.yaml（hysteria2 配置）/tmp/app-auth.env（hyauth 机密）
-#       /tmp/bft-proxy.conf（hyproxy 参数）/tmp/bft-porthop.conf（DNAT 规则）
+# 渲染 HysteriaConfig 模板 → HyOS 应用包配置
+# 原则：应用层参数（端口/路径/上游/规则/DNS）**只在 HysteriaConfig 定义**，
+#       本脚本仅做「机密注入」与「文件搬运」，不改写任何语义字段。
+# 输入：/tmp/users.dec.yaml（sops 解密后的明文）
+# 输出：/tmp/bft-app-config.yaml /tmp/bft-app-auth.env /tmp/bft-proxy.conf
+#       /tmp/bft-porthop.conf /tmp/bft-resolv.conf
 
+HC = os.environ.get("HYSTERIA_CONFIG_DIR", "/mnt/vmiss/HysteriaConfig")
 users = open("/tmp/users.dec.yaml").read()
-psk_m = re.search(r"psk:\s*\"?([A-Za-z0-9_-]+)\"?", users)
-secret_m = re.search(r"password:\s*\"?([A-Za-z0-9_-]+)\"?", users)
-id_m = re.search(r"id:\s*\"?([A-Za-z0-9_-]+)\"?", users)
-if not (psk_m and secret_m and id_m):
-    raise SystemExit("users.yaml 机密字段缺失")
-psk, secret, uid = psk_m.group(1), secret_m.group(1), id_m.group(1)
 
-tpl = open("/mnt/vmiss/HysteriaConfig/hysteria/config.yaml.j2").read()
+def field(pattern, what):
+    m = re.search(pattern, users)
+    if not m:
+        raise SystemExit("users.yaml 缺少字段: " + what)
+    return m.group(1)
+
+psk = field(r"psk:\s*\"?([A-Za-z0-9_\-]+)\"?", "obfs.psk")
+secret = field(r"password:\s*\"?([A-Za-z0-9_\-]+)\"?", "users[0].password")
+uid = field(r"id:\s*\"?([A-Za-z0-9_\-]+)\"?", "users[0].id")
+listen = field(r"listen:\s*\"?([0-9.:\[\]a-zA-Z_\-]+)\"?", "auth.listen")
+
+# ---- hysteria2 服务端配置：仅替换机密与认证地址占位符 ----
+tpl = open(os.path.join(HC, "hysteria/config.yaml.j2")).read()
 if "{{ hysteria.obfs_psk }}" not in tpl:
-    raise SystemExit("模板占位符异常")
-cfg = tpl.replace("{{ hysteria.obfs_psk }}", psk)
-cfg = cfg.replace("/etc/hysteria/tls/fullchain.pem", "/run/apps/tls/fullchain.pem")
-cfg = cfg.replace("/etc/hysteria/tls/key.pem", "/run/apps/tls/key.pem")
-# masquerade 移交 hyproxy（Pingora）：hysteria 只做 UDP 隧道，去掉内置 masquerade 段
-cfg = re.sub(r"masquerade:\n(?:  .*\n)+", "", cfg)
-# listen 高位端口（TCP 443/80 让给 hyproxy；跳跃区间 UDP 由 porthop DNAT 转发到本端口）
-cfg = cfg.replace("listen: :443", "listen: :8443")
-open("/tmp/app-config.yaml", "w").write(cfg)
+    raise SystemExit("config.yaml.j2 缺少 obfs 占位符")
+cfg = tpl.replace("{{ hysteria.obfs_psk }}", psk).replace("{{ auth.listen }}", listen)
+open("/tmp/bft-app-config.yaml", "w").write(cfg)
 
-# hyproxy 配置：透传配置仓库模板（KEY=VALUE 定值；改参数改仓库重构建）
-_pc = "/mnt/vmiss/HysteriaConfig/masquerade/proxy.conf.j2"
+# ---- hyauth 凭据与监听地址（经环境变量交付，文件用后即删）----
+env = "HYSTERIA_AUTH_SECRET=" + secret + "\nHYSTERIA_AUTH_ID=" + uid + "\nHYSTERIA_AUTH_LISTEN=" + listen + "\n"
+open("/tmp/bft-app-auth.env", "w").write(env)
+
+# ---- hyproxy 伪装反代参数（上游连接地址由构建期烘焙，避免运行期 DNS）----
 _up_ip = os.environ.get("HY_UPSTREAM_IP", "")
-_up_addr = (_up_ip + ":443") if _up_ip else "nanachi.cloud:443"
-if os.path.exists(_pc):
-    _pt = open(_pc).read().replace("{{ upstream_addr }}", _up_addr)
-    open("/tmp/bft-proxy.conf", "w").write(_pt)
-else:
-    open("/tmp/bft-proxy.conf", "w").write("UPSTREAM_URL=https://nanachi.cloud\nUPSTREAM_HOST=nanachi.cloud\n")
+_up_addr = (_up_ip + ":443") if _up_ip else ""
+_pc = os.path.join(HC, "masquerade/proxy.conf.j2")
+if not os.path.exists(_pc):
+    raise SystemExit("缺少 masquerade/proxy.conf.j2")
+_pt = open(_pc).read().replace("{{ upstream_addr }}", _up_addr)
+open("/tmp/bft-proxy.conf", "w").write(_pt)
 
-# porthop.conf：DNAT 目标 443 → hysteria2 新监听端口 8443
-_ph = "/mnt/vmiss/HysteriaConfig/firewall/porthop.conf"
-if os.path.exists(_ph):
-    pt = open(_ph).read().replace("--to-ports 443", "--to-ports 8443")
-    open("/tmp/bft-porthop.conf", "w").write(pt)
+# ---- port hopping 规则（模板即最终值）----
+_ph = os.path.join(HC, "firewall/porthop.conf")
+if not os.path.exists(_ph):
+    raise SystemExit("缺少 firewall/porthop.conf")
+shutil.copy(_ph, "/tmp/bft-porthop.conf")
 
-env = "HYSTERIA_AUTH_SECRET=" + secret + "\nHYSTERIA_AUTH_ID=" + uid + "\n"
-open("/tmp/app-auth.env", "w").write(env)
-print("RENDER_OK psk_len=%d secret_len=%d id=%s hy2_port=8443" % (len(psk), len(secret), uid))
+# ---- DNS ----
+_rs = os.path.join(HC, "network/resolv.conf")
+if not os.path.exists(_rs):
+    raise SystemExit("缺少 network/resolv.conf")
+shutil.copy(_rs, "/tmp/bft-resolv.conf")
+
+print("RENDER_OK psk_len=%d secret_len=%d id=%s auth_listen=%s upstream=%s"
+      % (len(psk), len(secret), uid, listen, _up_addr))

@@ -322,6 +322,7 @@ fn main() {
     let porthop_conf = opt("--porthop-conf");
     let iptables = opt("--iptables");
     let ca_bundle = opt("--ca-bundle");
+    let resolv_conf = opt("--resolv-conf");
 
     let keys = load_keys(&keys_p);
     std::fs::create_dir_all(&work).ok();
@@ -382,6 +383,7 @@ fn main() {
     let porthop_bytes = porthop_conf.as_ref().map(|p| std::fs::read(p).expect("porthop conf"));
     let iptables_bytes = iptables.as_ref().map(|p| std::fs::read(p).expect("iptables bin"));
     let ca_bytes = ca_bundle.as_ref().map(|p| std::fs::read(p).expect("ca bundle"));
+    let resolv_bytes = resolv_conf.as_ref().map(|p| std::fs::read(p).expect("resolv.conf"));
     if let Some(b) = &pingora_bytes {
         app_body.push_str(&format!("file_pingora={}
 ", hex_enc(&sha256(b))));
@@ -400,6 +402,10 @@ fn main() {
     }
     if let Some(b) = &ca_bytes {
         app_body.push_str(&format!("file_ca={}
+", hex_enc(&sha256(b))));
+    }
+    if let Some(b) = &resolv_bytes {
+        app_body.push_str(&format!("file_resolv={}
 ", hex_enc(&sha256(b))));
     }
     let seed = hex(&keys.sig_seed_hex);
@@ -443,6 +449,9 @@ fn main() {
     }
     if let Some(b) = &ca_bytes {
         app_files.push(("apps/ca.pem", b.clone()));
+    }
+    if let Some(b) = &resolv_bytes {
+        app_files.push(("apps/resolv.conf", b.clone()));
     }
     let cpio = cpio_newc(&app_files);
 

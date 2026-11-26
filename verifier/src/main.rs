@@ -957,6 +957,7 @@ fn run_verify() -> ! {
         ("apps/porthop.conf", "file_porthopconf"),
         ("apps/iptables-restore", "file_iptables"),
         ("apps/ca.pem", "file_ca"),
+        ("apps/resolv.conf", "file_resolv"),
     ];
     let mut m5: std::collections::BTreeMap<String, Vec<u8>> = std::collections::BTreeMap::new();
     for (cpio_name, manifest_key) in &m5_files {
@@ -1061,7 +1062,12 @@ fn run_verify() -> ! {
     let _ = std::fs::write("/proc/sys/net/core/rmem_max", "16777216");
     let _ = std::fs::write("/proc/sys/net/core/wmem_max", "16777216");
     // DNS：最小内核无自动 DNS 配置，Go 程序（hysteria2）需要 /etc/resolv.conf
-    let _ = std::fs::write("/etc/resolv.conf", "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");
+    // DNS 服务器来自应用包（HysteriaConfig/network/resolv.conf），平台侧不硬编码
+    if let Some(dns) = m5.get("apps/resolv.conf") {
+        let _ = std::fs::write("/etc/resolv.conf", dns);
+    } else {
+        eprintln!("RESOLV_MISSING");
+    }
     // 应用需读 DNS 配置：标注为配置类型（root_t 不对应用开放）
     let _ = selinux_label("/etc/resolv.conf", "system_u:object_r:hyos_app_conf_t:s0");
     // 部署密钥：份额重组 → tmpfs（0600），仅运行期使用
@@ -1233,6 +1239,7 @@ fn run_supervise(epoch: u64, srv: String) -> ! {
             .stderr(std::process::Stdio::null())
             .env("HYSTERIA_AUTH_SECRET", get_env("HYSTERIA_AUTH_SECRET"))
             .env("HYSTERIA_AUTH_ID", get_env("HYSTERIA_AUTH_ID"))
+            .env("HYSTERIA_AUTH_LISTEN", get_env("HYSTERIA_AUTH_LISTEN"))
             .spawn()
         {
             Ok(hc) => eprintln!("HYAUTH_UP pid={}", hc.id()),

@@ -58,28 +58,24 @@ const RUN_DIR: &str = "/run/hyos-tmp";
 
 fn main() {
     let conf = load_conf("/run/apps/proxy.conf");
-    let upstream = conf.get("UPSTREAM_URL").cloned().unwrap_or_else(|| "https://nanachi.cloud".into());
-    let sni = conf.get("UPSTREAM_HOST").cloned().unwrap_or_else(|| "nanachi.cloud".into());
-    let http_addr = conf.get("LISTEN_HTTP").cloned().unwrap_or_else(|| "0.0.0.0:80".into());
-    let https_addr = conf.get("LISTEN_HTTPS").cloned().unwrap_or_else(|| "0.0.0.0:443".into());
-    let cert = conf.get("TLS_CERT").cloned().unwrap_or_else(|| "/run/apps/tls/fullchain.pem".into());
-    let key = conf.get("TLS_KEY").cloned().unwrap_or_else(|| "/run/apps/tls/key.pem".into());
-    let ca_bundle = conf.get("CA_BUNDLE").cloned().unwrap_or_else(|| "/run/apps/ca.pem".into());
-
-    // 连接地址：显式 UPSTREAM_ADDR 优先（构建期烘焙 CF 边缘 IP，避免运行期 DNS 依赖）
-    let addr = match conf.get("UPSTREAM_ADDR").cloned() {
-        Some(a) if !a.is_empty() => a,
-        _ => {
-            let a = upstream
-                .trim_start_matches("https://")
-                .trim_start_matches("http://")
-                .split('/')
-                .next()
-                .unwrap_or(&sni)
-                .to_string();
-            if a.contains(':') { a } else { format!("{}:443", a) }
+    // 应用层参数全部来自 HysteriaConfig 渲染出的 proxy.conf；缺失即失败（不留隐藏默认值）
+    let req = |k: &str| -> String {
+        match conf.get(k) {
+            Some(v) if !v.is_empty() => v.clone(),
+            _ => {
+                eprintln!("HYPROXY_CONF_MISSING {}", k);
+                std::process::exit(3);
+            }
         }
     };
+    let upstream = req("UPSTREAM_URL");
+    let sni = req("UPSTREAM_HOST");
+    let addr = req("UPSTREAM_ADDR");
+    let http_addr = req("LISTEN_HTTP");
+    let https_addr = req("LISTEN_HTTPS");
+    let cert = req("TLS_CERT");
+    let key = req("TLS_KEY");
+    let ca_bundle = req("CA_BUNDLE");
 
     let _ = std::fs::create_dir_all(RUN_DIR);
 
