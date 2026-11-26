@@ -1,5 +1,5 @@
-# 生产部署 runbook — v10（安全加固版）
-# did=deva7d15dad6d  sha256=6ae35184abef360adf2ba8f80c40dbfbf39a0be3a6b04a259f9d0215845aa1a7
+# 生产部署 runbook — v12（安全加固 + masquerade 修复）
+# did=devaa6301ce84  sha256=a5e088ce4b4ecc43050667693fd94d5a101854ad3147243255857c69e50d998c
 # 镜像：build/dist/deploy-vmiss-gz-01.img（70189056 B）
 
 ## 本轮安全修复（对应评审 8 项）
@@ -17,6 +17,14 @@
 7. 权限面收口：删除 app→supervisor 的 fd/fifo 写；禁用应用写 console/tty（日志只由 supervisor 输出）；
    应用不得 net_admin/sys_admin（iptables 需 CAP_NET_ADMIN，故在 supervisor 域执行）。
 8. 服务端 ACME_DOMAIN 未配置时拒绝（不再隐式放行任意域名）。
+
+## v12 变更（相对 v10）
+- hyproxy 上游 TLS 校验改用镜像内置 CA 包（/run/apps/ca.pem，构建期从构建机复制）——
+  最小镜像无系统证书库，此前导致上游握手失败 → 伪装页面 502
+- 上游连接地址构建期烘焙为 CF 边缘 IP（UPSTREAM_ADDR=104.21.0.204:443，SNI 仍为 nanachi.cloud），
+  不依赖运行期 DNS
+- Pingora 的 pid/upgrade socket 改到 /run/hyos-tmp（应用域不可写 rootfs /tmp）
+- 内核 console 增加 tty0：VNC 现在能看到内核与 supervisor 日志（此前只有 ttyS0 串口）
 
 ## 部署步骤
 1. VMISS 面板重装 Debian 13

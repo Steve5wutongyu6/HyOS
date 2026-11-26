@@ -4,13 +4,15 @@
 // 参数来自 /run/apps/proxy.conf（KEY=VALUE），由配置仓库渲染注入
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use pingora::listeners::tls::TlsSettings;
 use pingora::prelude::*;
+use pingora::server::configuration::{Opt, ServerConf};
 use pingora::upstreams::peer::HttpPeer;
 
 struct Masq {
-    upstream_addr: String, // host:port
+    upstream_addr: String, // 连接地址 host:port（可用 IP，避免依赖 DNS）
     upstream_sni: String,  // 上游 SNI / Host 头
 }
 
@@ -44,12 +46,15 @@ fn load_conf(path: &str) -> HashMap<String, String> {
                 continue;
             }
             if let Some((k, v)) = line.split_once('=') {
-                m.insert(k.to_string(), v.to_string());
+                m.insert(k.trim().to_string(), v.trim().to_string());
             }
         }
     }
     m
 }
+
+/// 应用日志/pid/socket 落在私有 tmpfs（应用域只对 /run/hyos-tmp 有写权限）
+const RUN_DIR: &str = "/run/hyos-tmp";
 
 fn main() {
     let conf = load_conf("/run/apps/proxy.conf");
@@ -59,26 +64,55 @@ fn main() {
     let https_addr = conf.get("LISTEN_HTTPS").cloned().unwrap_or_else(|| "0.0.0.0:443".into());
     let cert = conf.get("TLS_CERT").cloned().unwrap_or_else(|| "/run/apps/tls/fullchain.pem".into());
     let key = conf.get("TLS_KEY").cloned().unwrap_or_else(|| "/run/apps/tls/key.pem".into());
+    let ca_bundle = conf.get("CA_BUNDLE").cloned().unwrap_or_else(|| "/run/apps/ca.pem".into());
 
-    // UPSTREAM_URL = https://host[:port] → HttpPeer 需要 host:port
-    let addr = upstream
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .unwrap_or(&sni)
-        .to_string();
-    let addr = if addr.contains(':') { addr } else { format!("{}:443", addr) };
+    // 连接地址：显式 UPSTREAM_ADDR 优先（构建期烘焙 CF 边缘 IP，避免运行期 DNS 依赖）
+    let addr = match conf.get("UPSTREAM_ADDR").cloned() {
+        Some(a) if !a.is_empty() => a,
+        _ => {
+            let a = upstream
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split('/')
+                .next()
+                .unwrap_or(&sni)
+                .to_string();
+            if a.contains(':') { a } else { format!("{}:443", a) }
+        }
+    };
 
-    let app = Masq { upstream_addr: addr, upstream_sni: sni };
-    let mut server = Server::new(None).expect("server init");
+    let _ = std::fs::create_dir_all(RUN_DIR);
+
+    // Pingora 默认把 pid/upgrade socket 放 /tmp（应用域不可写 rootfs）→ 改到私有 tmpfs
+    let mut sc = ServerConf::default();
+    sc.daemon = false;
+    sc.pid_file = format!("{}/hyproxy.pid", RUN_DIR);
+    sc.upgrade_sock = format!("{}/hyproxy_upgrade.sock", RUN_DIR);
+    sc.threads = 2;
+    // 上游 TLS 校验使用镜像内置 CA 包（最小镜像无系统证书库）
+    if std::path::Path::new(&ca_bundle).exists() {
+        sc.ca_file = Some(ca_bundle.clone());
+    }
+
+    let app = Masq { upstream_addr: addr.clone(), upstream_sni: sni.clone() };
+    let mut server = Server::new_with_opt_and_conf(None::<Opt>, sc);
     server.bootstrap();
+
+    // 生效的 CA 配置（诊断：确认是否真的用上了内置 CA 包）
+    eprintln!(
+        "HYPROXY_UP http={} https={} upstream={} addr={} sni={} ca={}",
+        http_addr,
+        https_addr,
+        upstream,
+        addr,
+        sni,
+        server.configuration.ca_file.clone().unwrap_or_else(|| "(none)".into())
+    );
 
     let mut service = http_proxy_service(&server.configuration, app);
     service.add_tcp(&http_addr);
     let tls = TlsSettings::intermediate(&cert, &key).expect("tls settings load");
     service.add_tls_with_settings(&https_addr, None, tls);
     server.add_service(service);
-    eprintln!("HYPROXY_UP http={} https={} upstream={}", http_addr, https_addr, upstream);
     server.run_forever();
 }

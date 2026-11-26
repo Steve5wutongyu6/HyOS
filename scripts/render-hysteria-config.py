@@ -29,8 +29,11 @@ open("/tmp/app-config.yaml", "w").write(cfg)
 
 # hyproxy 配置：透传配置仓库模板（KEY=VALUE 定值；改参数改仓库重构建）
 _pc = "/mnt/vmiss/HysteriaConfig/masquerade/proxy.conf.j2"
+_up_ip = os.environ.get("HY_UPSTREAM_IP", "")
+_up_addr = (_up_ip + ":443") if _up_ip else "nanachi.cloud:443"
 if os.path.exists(_pc):
-    shutil.copy(_pc, "/tmp/bft-proxy.conf")
+    _pt = open(_pc).read().replace("{{ upstream_addr }}", _up_addr)
+    open("/tmp/bft-proxy.conf", "w").write(_pt)
 else:
     open("/tmp/bft-proxy.conf", "w").write("UPSTREAM_URL=https://nanachi.cloud\nUPSTREAM_HOST=nanachi.cloud\n")
 

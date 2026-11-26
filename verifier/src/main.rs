@@ -956,6 +956,7 @@ fn run_verify() -> ! {
         ("apps/proxy.conf", "file_proxyconf"),
         ("apps/porthop.conf", "file_porthopconf"),
         ("apps/iptables-restore", "file_iptables"),
+        ("apps/ca.pem", "file_ca"),
     ];
     let mut m5: std::collections::BTreeMap<String, Vec<u8>> = std::collections::BTreeMap::new();
     for (cpio_name, manifest_key) in &m5_files {
@@ -1018,6 +1019,10 @@ fn run_verify() -> ! {
         if m5.contains_key("apps/proxy.conf") {
             let _ = std::fs::write("/run/apps/proxy.conf", &m5["apps/proxy.conf"]);
             let _ = selinux_label("/run/apps/proxy.conf", "system_u:object_r:hyos_app_conf_t:s0");
+        }
+        if m5.contains_key("apps/ca.pem") {
+            let _ = std::fs::write("/run/apps/ca.pem", &m5["apps/ca.pem"]);
+            let _ = selinux_label("/run/apps/ca.pem", "system_u:object_r:hyos_app_conf_t:s0");
         }
         if m5.contains_key("apps/porthop.conf") {
             let _ = std::fs::write("/run/apps/porthop.conf", &m5["apps/porthop.conf"]);

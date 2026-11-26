@@ -430,7 +430,7 @@ static grub_err_t hyverify_boot_cmd (grub_command_t cmd __attribute__((unused)),
   {
     char *cl = grub_malloc (512);
     grub_snprintf (cl, 512,
-                   "console=ttyS0 hy_ver=%d hy_epoch=%llu hy_attest=%s hy_img=%s",
+                   "console=ttyS0 console=tty0 hy_ver=%d hy_epoch=%llu hy_attest=%s hy_img=%s",
                    HY_GRUB_VER, (unsigned long long)slot.epoch, attestb64, imghex);
     grub_env_set ("hy_cmdline", cl);
     grub_free (cl);

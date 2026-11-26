@@ -128,6 +128,8 @@ if [ ! -s "$B/hysteria" ]; then
     || { echo "hysteria build fail"; exit 1; }
 fi
 
+export HY_UPSTREAM_IP="$(echo "$SRV" | cut -d: -f1)"
+echo "HY_UPSTREAM_IP=$HY_UPSTREAM_IP"
 echo "=== 3d. 渲染生产配置（SOPS 解密机密 + 模板替换）+ 证书 ==="
 export SOPS_AGE_KEY_FILE=/mnt/vmiss/hyos-age-key.txt
 cd /mnt/vmiss/HysteriaConfig
@@ -159,11 +161,17 @@ echo "=== 5. initramfs + 镜像 ==="
 bash scripts/build-initrd.sh > /tmp/bft-initrd.log 2>&1 || { tail -6 /tmp/bft-initrd.log; exit 1; }
 mkdir -p $B/dist
 # EXTRA_ARGS：masquerade 组件（hyproxy/proxy.conf/porthop/iptables-restore）按产物存在与否拼接
+# 内置根证书包（最小镜像无系统证书库；hyproxy 上游 TLS 校验使用）
+CA_BUNDLE=$B/ca.pem
+if [ ! -s "$CA_BUNDLE" ]; then
+  cp /etc/ssl/certs/ca-certificates.crt "$CA_BUNDLE" 2>/dev/null || { echo "缺少 CA 包源"; exit 1; }
+fi
 EXTRA_ARGS=""
 if [ -s "$B/hyproxy" ]; then EXTRA_ARGS="--pingora $B/hyproxy"; fi
 if [ -s /tmp/bft-proxy.conf ]; then EXTRA_ARGS="$EXTRA_ARGS --proxy-conf /tmp/bft-proxy.conf"; fi
 if [ -s /tmp/bft-porthop.conf ]; then EXTRA_ARGS="$EXTRA_ARGS --porthop-conf /tmp/bft-porthop.conf"; fi
 if [ -s "$B/iptables-restore" ]; then EXTRA_ARGS="$EXTRA_ARGS --iptables $B/iptables-restore"; fi
+if [ -s "$CA_BUNDLE" ]; then EXTRA_ARGS="$EXTRA_ARGS --ca-bundle $CA_BUNDLE"; fi
 IMG=$B/dist/deploy-$NAME.img
 CFG_ARGS=""
 if [ "${TEST_MODE:-0}" = 1 ]; then
