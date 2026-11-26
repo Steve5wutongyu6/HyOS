@@ -2,7 +2,6 @@
 
 | 项 | 内容 |
 |---|---|
-| 日期 | 2026-11-22 |
 | 结论 | **E2E ALL PASS（9/9 场景通过，契约测试 21/21）** |
 | 环境 | macOS 宿主 + Lima 2.3.0；客机 aarch64 Debian 13（6 vCPU / 12 GiB） |
 | 目标平台 | x86_64 BIOS 虚机（qemu-system-x86_64，TCG 软件模拟） |
@@ -77,12 +76,12 @@ limactl shell hyos-dev -- bash /mnt/vmiss/hyos-build/tests/e2e.sh
 
 ---
 
-## 5. 与设计文档的偏差（已同步 v1.3）
+## 5. 与设计文档的差异
 
-| 项 | 设计（v1.2） | 实测实现 | 原因与影响 |
+| 项 | 设计 | 实测实现 | 原因与影响 |
 |---|---|---|---|
 | GRUB 取钥 | HTTP + 应用层信封加密在线取钥 | **离线槽解密**（GRUB 直接用白盒 WK0 解槽内 wrap） | BIOS 下 GRUB 无原生网卡驱动（`e1000.mod` 不存在），仅 PXE 栈可用。防回滚改由验证器 ack 阶段的服务端校验 + L5 兜底承担；GRUB 层仍保留签名/哈希/槽完整性校验 |
-| 应用执行强制 | IMA appraisal + eBPF LSM | 未实现（本轮验证到 supervisor 启动） | 属 M3 剩余项，需要内核 IMA/LSM 配置与逐文件签名写入 |
+| 应用执行强制 | IMA appraisal + eBPF LSM | 未实现（验证到 supervisor 启动） | 属 M3 剩余项，需要内核 IMA/LSM 配置与逐文件签名写入 |
 | 白盒化 | XOR 份额 + 微型 VM 重组 + 控制流平坦化 | 仅 XOR 8 份额（运行期重组） | VM 化/平坦化属加固项，不影响功能验证 |
 | prod 变体裁剪（无 SSH/shell） | CI 断言强制 | 未验证（当前 debug 变体含 busybox 依赖面） | M4 项 |
 | GitHub Actions + S3 上传 | 流水线 | 未接入（本地 Lima 内构建） | M5 项 |
@@ -105,15 +104,14 @@ limactl shell hyos-dev -- bash /mnt/vmiss/hyos-build/tests/e2e.sh
 ## 7. 后续工作
 
 1. **M3 收尾**：内核 IMA appraisal + eBPF LSM（执行前验签、拒绝即删）。
-2. **设计文档 v1.3**：写入"GRUB 离线取钥"的最终取舍与威胁模型影响；补充 disk 模块依赖、printk 静默等实现约束。
-3. **白盒化加固**：份额拆分 + 微型 VM 重组 + 控制流平坦化，并做一次 strings/IDA 抽查。
-4. **prod 变体**：裁剪 shell/SSH，加入 CI 断言（构建产物扫描即失败）。
-5. **CI**：GitHub Actions 构建 + 签名 + 对象存储上传 + D1 清单发布；dd 全自动部署演练。
-6. **性能回归**：在 TCG 之外用 KVM 硬件加速复测启动时间与 hysteria2 吞吐。
+2. **白盒化加固**：份额拆分 + 微型 VM 重组 + 控制流平坦化，并做一次 strings/IDA 抽查。
+3. **prod 变体**：裁剪 shell/SSH，加入 CI 断言（构建产物扫描即失败）。
+4. **dd 全自动部署演练**。
+5. **性能回归**：在 TCG 之外用 KVM 硬件加速复测启动时间与 hysteria2 吞吐。
 
 ---
 
-## 8. SELinux 强制访问控制联调（2026-11-23 补充轮）
+## 8. SELinux 强制访问控制联调
 
 | 项 | 内容 |
 |---|---|
@@ -156,15 +154,15 @@ PROBE ETC_WRITE=DENIED(13)      # /etc 写被拒
 APP_OK sealed → ADVANCE OK seq=2 → HYOS E2E SUCCESS
 ```
 
-诊断手段：运行期回读文件 xattr 与 `/proc/mounts`；`type=1401 invalid_context` 事件是本轮定位角色授权缺失的关键线索。
+诊断手段：运行期回读文件 xattr 与 `/proc/mounts`；`type=1401 invalid_context` 事件是定位角色授权缺失的关键线索。
 
 ### 8.4 CI 状态
 
-GitHub Actions（Steve5wutongyu6/HyOS）：单元测试 6/6 ✅、Worker 契约 21/21 ✅（Secrets 注入 + 本地 D1）；镜像 job 在依赖安装修复后执行内核/GRUB/用户态/SELinux/制品全量构建并上传对象存储。
+GitHub Actions（Steve5wutongyu6/HyOS）：单元测试 6/6 ✅、Worker 契约 21/21 ✅（Secrets 注入 + 本地 D1）；镜像 job 执行内核/GRUB/用户态/SELinux/制品全量构建并上传对象存储。
 
 ---
 
-## 9. 内核最小化裁剪（2026-11-23 补充轮）
+## 9. 内核最小化裁剪
 
 | 项 | 裁剪前 | 裁剪后 |
 |---|---|---|
@@ -200,7 +198,7 @@ HID/USB/Wireless/Bluetooth/声音/DRM/Framebuffer/RTC/Watchdog/Thermal/I2C/SPI/M
 - `tests/e2e.sh` 全量 9 场景：e1/e7/e8 `E2E SUCCESS`；e2/e3/e4/e5/e6 销毁标记齐全（L0/L1/grub_ok-refused/L2/L3）；e9 `L5 WIPE` → **E2E ALL PASS**。
 - 构建脚本同时修复：用户态统一显式 `--target x86_64`（修复 CI proc-macro 单元异常；`crt-static` 仅经 CARGO_TARGET_* 注入，proc-macro 宿主工件不受污染）。
 
-### 9.5 CI 镜像 job 第 5 步失败根因（2026-11-23 追加）
+### 9.5 CI 镜像 job 第 5 步失败根因
 
 | 项 | 内容 |
 |---|---|
@@ -210,7 +208,7 @@ HID/USB/Wireless/Bluetooth/声音/DRM/Framebuffer/RTC/Watchdog/Thermal/I2C/SPI/M
 | 修复 | `ls` 加 `\|\| true` 守卫 + 缺商店时显式报错退出 1；CI apt 增加 `selinux-policy-default`；`expand-check=0` 写入 semanage.conf |
 | 验证 | 本地：有商店 `SELINUX_POLICY_OK bytes=1715650` ✓；无商店显式报错 exit 1 ✓；purge+重装包后 postinst 重建商店路径与 runner 全新装包一致 ✓ |
 
-### 9.6 二次收紧（EXPERT 与 select 链，2026-11-23 追加）
+### 9.6 EXPERT 与 select 链
 
 | 项 | 内容 |
 |---|---|
@@ -218,53 +216,53 @@ HID/USB/Wireless/Bluetooth/声音/DRM/Framebuffer/RTC/Watchdog/Thermal/I2C/SPI/M
 | 手段 | 处理 EXPERT 未提示行为与两条 select 反拉链（WLAN→WIRELESS、PTP_1588_CLOCK→PPS），反向断言扩为十项"不得为 y"校验 |
 | 回归 | contract 21/21 ✓ enforcing 引导 E2E SUCCESS ✓ 探测矩阵 ✓ |
 
-### 9.7 CI 制品分发切换 R2（2026-11-23）
+### 9.7 CI 制品分发（R2）
 
-S3（Bitiful cn-east-1）跨境上传慢 → 改用 Cloudflare R2（同账号 API Token，`wrangler r2 object put`，无需 AWS 凭据；桶 `hyos-artifacts`，对象路径布局不变 `hyos/YYYYMMDD/deploy-<did>.img`）。roundtrip 实测 put/get/delete 全通；工作流同步移除 awscli 依赖与 S3_* Secrets 注入（GH Secrets 中的 S3_* 保留但不再使用）。
+CI 制品经 Cloudflare R2 分发（同账号 API Token，`wrangler r2 object put`，无需 AWS 凭据；桶 `hyos-artifacts`，对象路径 `hyos/YYYYMMDD/deploy-<did>.img`）。roundtrip 实测 put/get/delete 全通；工作流移除 awscli 依赖与 S3_* Secrets 注入（GH Secrets 中的 S3_* 保留但不再使用）。
 
-### 9.8 生产参数注入 + 一机一镜像（2026-11-23 追加）
+### 9.8 生产参数注入与一机一镜像
 
 | 项 | 内容 |
 |---|---|
-| 目标 | 解决 DD 部署前的三个生产阻塞：网络参数硬编码（QEMU 值/无网关）、hyinit 无 DNS、一机一镜像 |
+| 范围 | 网络参数注入、无 DNS 环境寻址、一机一镜像 |
 | 注入通道 | `system.manifest`（Ed25519 签名）新增 `hy_net_ip/hy_net_mask/hy_net_gw/hy_srv/hy_srv_host` 字段——清单被篡改时验签失败触发销毁 |
-| hyinit 改造 | 网络参数从签名清单读取（缺省回落 QEMU 联调值）；新增 `route_add_default_via`（netlink RTM_NEWROUTE + RTNH_F_ONLINK + RTA_OIF，ifindex 取自 sysfs）；HTTP Host 头可配（`hy_srv=IP:PORT@域名`，CF 边缘 IP 直连按 Host 路由，hyinit 无 DNS） |
-| ioctl 路线废弃原因 | SIOCADDRT 在裁剪内核上 fib_check_nh_v4_gw 网关 fib_lookup 失败（ENETUNREACH/errno 101，非 SELinux——宿主内核同序列复现成功），netlink ONLINK 分支无此依赖 |
+| hyinit 行为 | 网络参数从签名清单读取（缺省回落 QEMU 联调值）；新增 `route_add_default_via`（netlink RTM_NEWROUTE + RTNH_F_ONLINK + RTA_OIF，ifindex 取自 sysfs）；HTTP Host 头可配（`hy_srv=IP:PORT@域名`，CF 边缘 IP 直连按 Host 路由，hyinit 无 DNS） |
+| 采用 netlink 的原因 | SIOCADDRT 在裁剪内核上 fib_check_nh_v4_gw 网关 fib_lookup 失败（ENETUNREACH/errno 101，非 SELinux——宿主内核同序列复现成功），netlink ONLINK 分支无此依赖 |
 | 一机一镜像 | `scripts/build-for-target.sh --name X --net-ip/--net-mask/--net-gw/--srv [--test-mode]`：全新设备密钥 → 注册生产 → 用户态/GRUB 重建（VK/WK0 绑定新密钥）→ 清单注入 → initrd/镜像 → R2 `hyos/targets/<名称>/` |
 | 验证 | 注入镜像 QEMU 引导：`NET UP 10.0.2.15/24` + `NET GW via 10.0.2.2 (netlink onlink)` + APP_OK sealed + **E2E SUCCESS**；默认路径回归：契约 21/21 + E2E SUCCESS |
 
-### 9.9 TLS 化（2026-11-23 追加）
+### 9.9 TLS
 
 | 项 | 内容 |
 |---|---|
-| 动机 | 明文 HTTP 下中间人可伪造 403 拒绝 ack → 强制销毁（on-path DoS）；TLS 服务器证书校验彻底关闭该攻击面 |
+| 作用 | 关闭明文 HTTP 下中间人伪造 403 拒绝 ack 触发强制销毁的攻击面（on-path DoS） |
 | 方案 | rustls 0.23（ring 后端，静态链接）+ webpki-roots 内嵌公共 CA；cargo feature `tls` 可选——本地 QEMU 联调走明文 HTTP（本地 worker 无 TLS），生产构建启用 |
 | 时间依赖 | TLS 证书校验需要真实时间 → 内核启用 RTC_CLASS/HCTOSYS/RTC_DRV_CMOS（CMOS 硬件时钟 → 系统时钟），bzImage 3.86→3.88MB |
-| hyinit 改造 | TLS_MODE 静态开关（清单 hy_tls=1）→ http_post 双模式（TCP/rustls）；SNI 与 HTTP Host 同取 hy_srv_host；supervisor 为独立进程，TLS 标志经 HY_TLS 环境继承（曾因静态变量不共享导致 supervisor 明文回退被 CF 拒绝销毁） |
+| hyinit 改造 | TLS_MODE 静态开关（清单 hy_tls=1）→ http_post 双模式（TCP/rustls）；SNI 与 HTTP Host 同取 hy_srv_host；supervisor 为独立进程，TLS 标志经 HY_TLS 环境传递（进程间不共享静态变量） |
 | 失败语义 | hy_tls=1 但二进制不支持 → 拒绝明文回退 → 按服务器不可达销毁（fail-closed） |
 | 体积 | hyinit 静态二进制 1.6→2.84MB（+1.2MB TLS 栈） |
 | 生产级验证 | QEMU 客机 → SLIRP NAT → 公网 → CF 边缘 IP:443 → TLS（SNI=hyos.nanachi.cloud，webpki 根校验，真实时间）→ grub_ok/sys_ok/app_ok/alive 全链路加密 ack → **E2E SUCCESS（Q_EXIT=0）** |
 | 回归 | 明文路径 e2e 9/9 ALL PASS（TLS 改造无副作用）；CI 三 job 全绿 |
 
-### 9.10 M5：真 hysteria2 应用包（2026-11-24 追加）
+### 9.10 hysteria2 应用包
 
 | 项 | 内容 |
 |---|---|
 | 应用层 | **真 hysteria2 v2.14.0**（Go 静态交叉 25MB）+ **hyauth**（Rust 重写原 hysteria-auth-server.py，1.4MB 静态，监听 127.0.0.1:18080） |
 | 应用包扩容 | P3 app 分区 4.2MB → ~49MB（DISK 23→67MB），mkdisk 支持 --hysteria/--hyauth/--app-config/--auth-env/--tls-cert/--tls-key 多文件打包 + 逐文件哈希清单 |
 | 配置管线 | HysteriaConfig 私有仓库（SOPS+age）→ build-for-target 解密渲染（obfs PSK/auth 机密注入模板）→ 打入 p2 加密应用包（安全边界=DEK2） |
-| 证书 | 沿用现役 ACME 证书（oa.nanachi.cloud，从实测备份提取打包）；到期续期属后续项 |
+| 证书 | 由内置 ACME DNS-01 客户端自动管理（见 §9.11） |
 | verifier 改造 | lo 配置（hyauth bind 依赖）+ /etc/resolv.conf（Go DNS）+ hysteria 模式 spawn（hysteria server -c config + hyauth 先起）+ 逐文件哈希校验 + netlink 路由 |
 | SELinux | hyauth 端口标注（portcon 模块语言不支持 → build-policy.sh 经 semanage port 注入）+ hysteria UDP 443 类型 + name_connect + tty 诊断写 |
 | 传输硬化 | ack 全路径 connect_timeout(10s)/read 30s（网络抖动快速失败进销毁路径，不再挂死） |
 | 端到端验证 | QEMU(SLIRP) → 客户端(obfs+TLS+auth) → **HyOS 内 hysteria2** → SOCKS5 代理 → **www.cloudflare.com HTTP 200**；hyauth ok:true；E2E SUCCESS |
 | DD 就绪度 | 生产参数镜像构建管线全通；待真机 DD（用户确认时机） |
 
-### 9.11 证书自动续期（ACME DNS-01，2026-11-25 追加）
+### 9.11 证书自动续期（ACME DNS-01）
 
 | 项 | 内容 |
 |---|---|
-| 动机 | 现役 ACME 证书有效期至 2027-02，到期未续 → hysteria 无法启动 → fail-closed；此前依赖人工续期 |
+| 作用 | 证书到期自动续签，避免到期未续导致 hysteria 无法启动（fail-closed） |
 | 架构 | 设备内置 **ACME v2 (RFC 8555) DNS-01 客户端**（verifier/src/acme.rs，rustls+ring）：LE 账户创建（ES256 JWS）→ newOrder → DNS-01 → finalize(CSR DER 手工构造) → 证书下载 |
 | 安全模型 | 设备永不持有 Cloudflare 凭据：DNS-01 挑战经密钥服务 /v1/acme-dns 代理（设备 DK 签名鉴权，同 ack 信任模型）；域名白名单（ACME_DOMAIN Secret）；revoke/quarantine 即拒绝 |
 | 证书密钥 | 每次签发随机新生成 P-256（≠ 账户密钥，规避 LE duplicate 限流）；CSR 含 CN+SAN；PKCS#8 PEM 输出 |

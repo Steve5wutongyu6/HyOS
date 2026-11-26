@@ -4,7 +4,7 @@
 
 ## 部署方式概述
 
-HyOS 为每台目标机器单独构建镜像。构建脚本会生成全新的设备密钥并在生产库注册，随后重建用户态与 GRUB 使其与新密钥绑定，把网络参数和密钥服务地址写入签名清单，最后组装镜像并上传到对象存储，同时给出部署单（镜像路径、sha256、对象路径）。
+HyOS 为每台目标机器单独构建镜像。构建脚本会生成全新的设备密钥并在生产库注册，随后重建用户态与 GRUB 使其与新密钥绑定，把网络参数和密钥服务地址写入签名清单，最后组装镜像并上传到对象存储，同时输出含镜像路径、sha256 与对象路径的部署单。
 
 ## 第一步：构建目标镜像
 
@@ -41,7 +41,7 @@ r2=hyos-artifacts/hyos/targets/vmiss-gz-01/deploy-devXXXXXXXXXX.img
 
 VPS 救援模式或官方 DD 脚本都可以，核心是一条写入命令。
 
-方式 A：先在本地把镜像从对象存储拉下来，再传到目标机写盘（本地需要有 node 环境）：
+方式 A：本地拉取镜像后传到目标机写盘，需要本地有 node 环境：
 
 ```bash
 npx wrangler@3.114.17 r2 object get "hyos-artifacts/hyos/targets/vmiss-gz-01/deploy-devXXX.img" -f deploy.img
@@ -49,7 +49,7 @@ scp deploy.img root@<VPS>:/tmp/
 ssh root@<VPS> 'dd if=/tmp/deploy.img of=/dev/vda bs=4M conv=fsync status=progress && reboot'
 ```
 
-方式 B：目标机在救援系统中直接流式拉取并写盘（需要 curl）：
+方式 B：目标机在救援系统中直接流式拉取并写盘，需要 curl：
 
 ```bash
 curl -sS -H "Authorization: Bearer $OWNER_TOKEN" \
