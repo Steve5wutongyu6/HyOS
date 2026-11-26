@@ -35,3 +35,4 @@ probe-cache.txt
 testfile*
 # 测试密钥 fixture 一律不入库（由 scripts/gen-dev-keys.mjs 现场生成）
 server/tests/fixtures/
+!server/tests/fixtures/README.md
