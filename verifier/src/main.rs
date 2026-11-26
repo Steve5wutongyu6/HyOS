@@ -518,26 +518,48 @@ fn verify_srv_resp(msg: &str, sig_hex: &str) -> Result<(), String> {
 }
 
 fn ack(did: &str, stage: &str, epoch: u64, srv: &str) -> Result<(u16, String), String> {
-    // 一次性随机 nonce：PID1 恒为 1，任何确定性构造都会被重放
-    let mut nonce = [0u8; 32];
-    hyproto::fill_random(&mut nonce);
-    let nonce_b64 = b64url_encode(&nonce);
-    let msg = format!("{}|{}|{}|{}", did, stage, epoch, nonce_b64);
-    let sig = dk_sign(&msg);
-    let sig_hex = hex_encode(&sig); // 服务端按 hex 解析签名
-    let body = format!(
-        "{{\"did\":\"{}\",\"stage\":\"{}\",\"epoch\":{},\"nonce\":\"{}\",\"sig\":\"{}\"}}",
-        did, stage, epoch, nonce_b64, sig_hex
-    );
-    let (st, resp) = http_post(srv, "/v1/ack", &body)?;
-    // 响应必须绑定本次 nonce 并由服务端密钥签名；伪造的错误帧不得触发销毁
-    let outcome = json_field(&resp, "outcome").ok_or_else(|| "resp_no_outcome".to_string())?;
-    let rsig = json_field(&resp, "sig").ok_or_else(|| "resp_no_sig".to_string())?;
-    let rmsg = format!("{}|{}|{}|{}|{}", did, stage, epoch, nonce_b64, outcome);
-    verify_srv_resp(&rmsg, &rsig)?;
-    Ok((st, resp))
+    // 传输层重试：单次网络抖动不应触发 fail-closed 销毁（签名与一次性 nonce 仍然强制）
+    let mut last = String::from("no-attempt");
+    for attempt in 0..6u32 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(match attempt { 1 => 1500, 2 => 3000, 3 => 5000, _ => 8000 }));
+        }
+        // 一次性随机 nonce：PID1 恒为 1，任何确定性构造都会被重放
+        let mut nonce = [0u8; 32];
+        hyproto::fill_random(&mut nonce);
+        let nonce_b64 = b64url_encode(&nonce);
+        let msg = format!("{}|{}|{}|{}", did, stage, epoch, nonce_b64);
+        let sig = dk_sign(&msg);
+        let sig_hex = hex_encode(&sig);
+        let body = format!(
+            "{{\"did\":\"{}\",\"stage\":\"{}\",\"epoch\":{},\"nonce\":\"{}\",\"sig\":\"{}\"}}",
+            did, stage, epoch, nonce_b64, sig_hex
+        );
+        match http_post(srv, "/v1/ack", &body) {
+            Ok((st, resp)) => {
+                let outcome = json_field(&resp, "outcome");
+                let rsig = json_field(&resp, "sig");
+                match (outcome, rsig) {
+                    (Some(o), Some(sg)) => {
+                        let rmsg = format!("{}|{}|{}|{}|{}", did, stage, epoch, nonce_b64, o);
+                        if verify_srv_resp(&rmsg, &sg).is_ok() {
+                            // 有效签名：4xx 为服务端权威拒绝（不可重试），其余都交回调用方判定
+                            if st < 500 {
+                                return Ok((st, resp));
+                            }
+                            last = format!("http_{}", st);
+                        } else {
+                            last = "resp_sig_invalid".into();
+                        }
+                    }
+                    _ => last = format!("resp_unsigned_http_{}", st),
+                }
+            }
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
 }
-
 fn parse_kv(text: &str) -> BTreeMap<String, String> {
     let mut m = BTreeMap::new();
     for line in text.lines() {
@@ -563,7 +585,8 @@ fn l2_wipe_app_and_off(srv: &str, did: &str, epoch: u64, stage: &str) -> ! {
     eprintln!("HYOS DESTROY[{}] wiping p3...", stage);
     let mut f = open_disk();
     wipe_sectors(&mut f, P3_START, 2 + 16);
-    let _ = ack(did, stage, epoch, srv);
+    // 诊断：销毁原因以 fatal:<tag> 事件上报（服务端仅记录，不推进状态机）
+    let _ = ack(did, &format!("fatal:{}", stage), epoch, srv);
     poweroff();
 }
 
@@ -581,7 +604,7 @@ fn destroy_all_and_off(srv: &str, did: &str, epoch: u64, tag: &str) -> ! {
     let mut f = open_disk();
     wipe_sectors(&mut f, P2_START, 2 + 16);
     wipe_sectors(&mut f, P3_START, 2 + 16);
-    let _ = ack(did, "app_fail", epoch, srv);
+    let _ = ack(did, &format!("fatal:{}", tag), epoch, srv);
     poweroff();
 }
 
@@ -589,7 +612,7 @@ fn l3_wipe(srv: &str, did: &str, epoch: u64, tag: &str) -> ! {
     eprintln!("HYOS DESTROY[{}] wiping p3 (L3)", tag);
     let mut f = open_disk();
     wipe_sectors(&mut f, P3_START, 2 + 16);
-    let _ = ack(did, "app_fail", epoch, srv);
+    let _ = ack(did, &format!("fatal:{}", tag), epoch, srv);
     poweroff();
 }
 

@@ -238,9 +238,9 @@ async function handleAck(env: Env, req: Request): Promise<Response> {
   const la = await lastAcked(env, did);
   if (epoch < la) return jSigned(env, 403, "err:epoch_regression", om("err:epoch_regression"));
 
-  // 事件型 ack（不参与状态机推进）：心跳与安全事件
+  // 事件型 ack（不参与状态机推进）：心跳、安全事件与销毁原因（fatal:<tag>）
   const EVENT_ONLY = ["alive", "exec_deny", "grub_bad", "app_fail"];
-  if (EVENT_ONLY.includes(stage)) {
+  if (EVENT_ONLY.includes(stage) || stage.startsWith("fatal:")) {
     await logEvent(env, did, stage, epoch, String(nonce || ""));
     if (stage === "grub_bad" || stage === "app_fail") {
       await env.DB.prepare("UPDATE devices SET status='quarantine' WHERE did=?1").bind(did).run();

@@ -75,6 +75,20 @@ if [ "${TLS:-0}" = 1 ]; then
 fi
 bash scripts/build-userland.sh > /tmp/bft-userland.log 2>&1 || { tail -10 /tmp/bft-userland.log; exit 1; }
 
+echo "=== 3a2. 同步服务端签名密钥 + 部署前自检 ==="
+# 镜像内置 SRV_PUB 来自本构建的 fixture；Worker 的 SRV_SK_PKCS8 必须与之配对，
+# 否则设备在 grub_ok 响应验签失败后 fail-closed 自毁（上电即断电，VNC 空白）。
+# 无论是否上传 R2 都要做（密钥配对与镜像内容无关）
+if [ -n "${CLOUDFLARE_API_TOKEN:-}" ] && [ -f server/.dev.vars ]; then
+  SRV_SK=$(grep "^SRV_SK_PKCS8=" server/.dev.vars | cut -d= -f2-)
+  if [ -n "$SRV_SK" ]; then
+    ( cd server && printf "%s" "$SRV_SK" | npx wrangler@3.114.17 secret put SRV_SK_PKCS8 >/dev/null 2>&1 ) \
+      && echo "SRV_SK 已同步到 Worker" || echo "WARN: SRV_SK 同步失败"
+  fi
+  node scripts/verify-worker-keys.mjs || { echo "自检失败：Worker 与镜像密钥不一致，终止构建"; exit 1; }
+else
+  echo "跳过（缺少 CI 凭据）"
+fi
 echo "=== 3b. GRUB 重建（core.img 必须绑定新 VK/WK0，否则清单验签失败即销毁）==="
 bash grub/build-grub.sh > /tmp/bft-grub.log 2>&1 || { tail -8 /tmp/bft-grub.log; exit 1; }
 
