@@ -1,93 +1,56 @@
 # HyOS
 
-**HyOS** 是一个专用于运行 Hysteria2 的裁剪 Linux 发行版，围绕三条安全主线构建：**安全启动自校验**、**双层加密**、**失败即自动销毁**。
+HyOS 是一个专为运行 Hysteria2 而打造的裁剪版 Linux 发行版。
 
-配套设计文档：《HyOS 安全启动与自动销毁设计方案》(v1.3) 与《Lima 联调验证报告》(见 `docs/`)。
+它把一台普通的 x86_64 BIOS 云主机变成一台专用的网络设备：上电之后，引导程序先校验自己，再逐层解密并验证系统与应用，全部通过后 Hysteria2 才开始对外服务。整个过程不需要任何人工输入，把镜像写入磁盘就完成了部署。而一旦任何一个环节发现问题——无论是系统不是自己的、引导被篡改过，还是与密钥服务失去了联系——设备都会按预定策略销毁相应数据，然后断电。
 
----
+## 工作原理
 
-## 设计要点
+启动过程是一条环环相扣的验证链：
 
-| 层次 | 机制 |
-|---|---|
-| GRUB (S1) | 上电自校验(窗口哈希 + Ed25519 签名 + 白盒常量) → 双槽解析 → 用白盒 KEK 解槽内 wrap → AES-256-GCM 解密系统镜像入内存 → 注册 hyram 内存盘 → 引导内核 |
-| 内核/initramfs (S2) | 反向校验 GRUB(版本/镜像哈希/DK 签名钉扎) → 校验系统清单 → 解密应用包(DEK2)入 tmpfs → 校验 app.manifest |
-| 内核最小化 | allnoconfig + 白名单 + EXPERT/反向断言(816 项/0 模块)，bzImage 3.86MB：仅串口/SELinux/IPv4+网卡/块设备/ACPI/netfilter-DNAT；HID/USB/无线/文件系统等全部不编入（`scripts/kernel-minimal.config`） |
-| 应用层 (S3) | 反向校验系统(rootfs 哈希 + 密钥一致性) → 短时令牌拉取私有 Git 配置(仅内存) → 按清单启动服务 |
-| SELinux (S3+) | enforcing 最小权限：应用锁定 `hyos_app_t` 域（块设备/危险能力/ptrace 编译期 neverallow），仅 `/run/hyos-tmp` 可写，配置只读；策略单块离线合成、构建期嵌入 |
-| 运行期 (S4) | 签名 ack 心跳、epoch 推进、失联即销毁 |
-| DD 部署 | 一机一镜像：目标网络/密钥服务地址经 **签名 manifest** 注入（篡改即销毁），`scripts/build-for-target.sh` 按目标构建+注册+R2 分发；hyinit 经 netlink(onlink) 装默认路由，直连 CF 边缘 IP（Host 头路由） |
-| 证书续期 | 内置 ACME DNS-01 客户端（LE staging 实测通过）：DNS 挑战经密钥服务代理（设备 DK 签名鉴权，永不持有 CF 凭据），证书每签发随机新密钥、仅存 tmpfs；失败回落内置证书 |
-| 传输加密 | 密钥服务通信用 **rustls TLS**（webpki 公共根校验 + CMOS RTC 真实时间），防中间人伪造拒绝导致的强制销毁；本地联调可回退明文 |
-| 应用层 | **真 hysteria2 v2.14.0**（Go 静态）+ hyauth（Rust 认证后端）打包进加密应用包；客户端 obfs+TLS+auth 全链路实测 200（`scripts/build-for-target.sh` 按目标构建） |
+1. **引导层**。定制过的 GRUB 上电第一件事是校验自身完整性：同时比对内存中的镜像和磁盘上的原始字节。确认无误后，它用内置的密钥材料解开磁盘上的系统镜像，载入内存并引导内核。
+2. **系统层**。内核和初始化环境反过来校验 GRUB 的版本与签名，确认引导链可信，然后解密应用包，交给应用管理器。
+3. **应用层**。Hysteria2 以及认证、伪装、端口跳跃等配套服务启动之前，再一次反向校验系统，随后从私有配置仓库拉取配置——配置只存在于内存中——然后开始对外服务。
+4. **运行期**。设备通过签名心跳与密钥服务保持联系。每完成一次成功启动，代数计数器就向前推进一格，服务端签发下一轮密钥，旧密钥随之作废。
 
-**销毁等级**：L0 GRUB 自毁 / L1 镜像区 / L2 应用包 / L3 应用自毁 / L4 未签名执行(待 IMA 落地) / L5 运行期失联全盘。
-
-**密钥体系**：`WK0_root`(GRUB 白盒) → `WK0[e]` → `wrap(DEK1)`；`WK1_root`(验证器白盒) → `WK1[e]` → `wrap(DEK2)`；设备身份 `DK` 用于双向证明。每次成功启动推进 epoch 并由服务端签发下一轮 KEK。
-
----
+磁盘上的系统镜像和应用包分别由两套完全独立的密钥加密，密钥本身不落在磁盘上。每一层都只信任上一层签名清单里钉扎过的版本。SELinux 以最小权限约束着应用所能触及的一切。校验失败时按轻重分级处置：轻则抹掉对应的分区，重则全盘擦除后断电。
 
 ## 目录结构
 
 ```
-grub/       定制 GRUB 模块 hyverify(C)：自校验、槽解析、GCM 解密、销毁写盘
-proto/      Rust 密码学核心：HKDF/KEK、AES-256-GCM、Ed25519、双槽头、信封
-verifier/   Rust initramfs 验证器 + 应用 supervisor(静态 x86_64)
-tools/      mkdisk(镜像组装/签名)、stubapp(联调占位应用)
-scripts/    构建脚本：内核、GRUB、用户态、initrd、密钥生成
-server/     Cloudflare Worker 密钥服务(本地 D1 可离线联调)
-tests/      e2e.sh / contract.mjs 与 devtools/(诊断工具)
-selinux/    SELinux 强制访问控制策略(用户态最小权限)
+grub/       定制 GRUB 模块 hyverify：自校验、槽解析、解密、销毁写盘
+proto/      Rust 密码学核心：HKDF、AES-256-GCM、Ed25519、双槽头
+verifier/   initramfs 验证器与应用 supervisor
+tools/      mkdisk 镜像组装、stubapp 联调占位应用
+scripts/    内核、GRUB、用户态、镜像的构建脚本
+server/     Cloudflare Worker 密钥服务
+tests/      端到端测试与契约测试
+selinux/    SELinux 强制访问控制策略
 lima/       本地 Lima 联调环境定义
 docs/       验证报告等技术文档
 ```
 
----
+## 本地开发与验证
 
-## 本地联调(Lima)
+项目通过 Lima 在本机完成构建和端到端验证：
 
 ```bash
 limactl start ./lima/hyos-dev.yaml --name hyos-dev
 limactl shell hyos-dev -- bash /mnt/vmiss/hyos-build/tests/e2e.sh
 ```
 
-`tests/e2e.sh` 会依次完成：清场 → 生成设备密钥 → 启动本地 Worker(wrangler dev + 本地 D1) → Worker 契约测试 → 全量构建(GRUB core.img / hyinit / initrd / 磁盘镜像) → 9 个引导场景断言(正常启动、epoch 推进、re-arm、L0–L5 销毁)。
+e2e 脚本会从清场、生成密钥开始，一路完成本地密钥服务启动、契约测试、全量构建，最后把九个引导场景逐一跑一遍：正常启动、代数推进、重新武装，以及各等级销毁。
 
-最近一次结果：**9/9 场景通过，契约 21/21；SELinux enforcing 模式 E2E SUCCESS**（应用域隔离 + 最小权限探测矩阵，见 `docs/lima-验证报告.md` §8）。
+## 持续集成
 
----
+仓库使用 GitHub Actions（`.github/workflows/build.yml`）。每次推送都会触发单元测试、Worker 契约测试和完整的镜像构建，产物上传到私有对象存储。
 
-## CI(GitHub Actions)
+## 生产环境
 
-工作流见 `.github/workflows/build.yml`。所有机密均通过 **GitHub Secrets** 注入，仓库内不含任何明文凭据。
+密钥服务以 Cloudflare Worker 的形式部署，名为 `hyos-keyserver`，地址是 https://hyos.nanachi.cloud ，数据库为 Cloudflare D1。每台设备在镜像构建时自动注册，部署之后由镜像自己完成激活和心跳。
 
-## 生产部署
+日常运维主要围绕两件事：吊销一台设备，或者允许一块旧磁盘重新启动。两者都通过密钥服务的接口完成，使用 OWNER_TOKEN 鉴权。
 
-| 组件 | 值 |
-|---|---|
-| 密钥服务 | Cloudflare Worker `hyos-keyserver`，生产地址 **https://hyos.nanachi.cloud**（custom domain，自动 DNS/证书） |
-| 数据库 | Cloudflare D1 `hyos`（`schema.sql` 已应用） |
-| Secrets | `CI_TOKEN` / `OWNER_TOKEN` / `SRV_SK_PKCS8` 经 `wrangler secret` 注入（生成器：`scripts/gen-prod-secrets.mjs`，产物存仓库外） |
-| CI 联动 | GH Actions 变量 `WORKER_URL` + Secret `HYOS_CI_TOKEN` → 构建尾自动 enroll 新设备；产物上传 S3 私有桶 |
+## 许可证
 
-运维操作：`OWNER_TOKEN` 用于 `/v1/rearm`（允许旧磁盘头再启动）与 `/v1/revoke`（立即吊销，下次启动即销毁）。
-
-| Secret | 用途 |
-|---|---|
-| `HYOS_GIT_SSH_KEY` | 读取私有配置仓库(HysteriaConfig)的**只读 Deploy Key** |
-| `HYOS_GIT_SSH_PASSPHRASE` | 上述密钥口令 |
-| `S3_AK` / `S3_SK` | 制品上传(S3 私有桶) |
-| `S3_ENDPOINT` / `S3_REGION` / `S3_BUCKET` | 对象存储定位 |
-| `CF_API_TOKEN` / `CF_ACCOUNT_ID` | 发布 D1 清单与 Worker |
-| `HYOS_SIGNING_KEY` | 镜像/清单签名私钥(离线保管，仅 CI 使用) |
-
-> 部署密钥在构建期以**份额拆分 + 运行期重组**(与 GRUB 白盒同机制)嵌入镜像，运行期仅用于在内存中拉取私有配置，配置文件不落盘。该保护属于纵深防御：真正的边界是镜像本身的加密与访问控制。
-
----
-
-## 许可与第三方
-
-- 本项目代码：见 `LICENSE`。
-- `grub/tweetnacl.c`：TweetNaCl(public domain)。
-- `grub/aes.c`：tiny-AES-c(MIT)。
-- GRUB / Linux 内核为运行期从官方源下载的独立项目，遵循其各自许可(GPL)。
+本项目代码的许可见 [LICENSE](LICENSE)。

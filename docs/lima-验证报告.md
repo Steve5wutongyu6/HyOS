@@ -14,7 +14,7 @@
 
 ## 1. 验证方法
 
-全流程脚本化、可复跑：
+全流程脚本化，可复跑：
 
 ```bash
 limactl shell hyos-dev -- bash /mnt/vmiss/hyos-build/tests/e2e.sh
@@ -58,31 +58,32 @@ limactl shell hyos-dev -- bash /mnt/vmiss/hyos-build/tests/e2e.sh
 
 | # | 缺陷 | 影响 | 修复 |
 |---|---|---|---|
-| 1 | `grub-mkimage` 只接受经 `genmod.sh` 处理的 `.mod`，不接受裸 ELF | 自研模块永远无法进入 core.img | 模块纳入 GRUB 构建树，用 Makefile 规则产出 `.module` → `.mod` |
-| 2 | 内核中 `grub_disk_write` 是 **weak 符号**，实体在 `disk.module` | 模块加载时符号解析失败 → grub_fatal 静默死机 | 显式链接 `disk` 模块（moddep 自动闭包） |
-| 3 | `syminfo.lst`/`moddep.lst` 必须按 Makefile 规则生成（含 `kernel_syms.lst` 与 `sort`） | 依赖表破损 → 加载顺序错乱 | 严格复刻 Makefile 规则重建 |
+| 1 | `grub-mkimage` 只接受经 `genmod.sh` 处理的 `.mod`，不接受裸 ELF | 自研模块无法进入 core.img | 模块纳入 GRUB 构建树，用 Makefile 规则产出 `.module` → `.mod` |
+| 2 | 内核中 `grub_disk_write` 是 weak 符号，实体在 `disk.module` | 模块加载时符号解析失败 → grub_fatal 静默死机 | 显式链接 `disk` 模块（moddep 自动闭包） |
+| 3 | `syminfo.lst`/`moddep.lst` 生成规则含 `kernel_syms.lst` 与 `sort` | 依赖表破损 → 加载顺序错乱 | 严格复刻 Makefile 规则重建 |
 | 4 | 自研 SHA-256 的填充逻辑用 `memset` 覆盖了刚写入的 `0x80` | 所有哈希错误 → 自校验/槽校验全失败 | 删除破坏性 memset |
 | 5 | 自研 GCM 的 GHASH 方向错误（加密前/解密后取数据） | 自测自洽但与 Node/Rust 互操作必失败 | GHASH 严格作用于密文 |
 | 6 | HKDF 空盐被当作 1 字节 0x00 | 与 RFC5869/Node/Rust 不一致 → KEK 不同 | 空盐使用 32 字节全零 |
 | 7 | tweetnacl 的 `sk` 布局是 `seed‖pk`，实现写成 `pk‖seed` | 签名私钥错误 → attestation 验签失败 | 修正布局 |
 | 8 | 验证器发送 ack 签名用 base64url，服务端按 hex 解析 | 全部 ack 403 → 误触发销毁 | 统一为 hex |
 | 9 | mkdisk 的 cpio newc 头把 ino 写成 6 位（应 8 位），TRAILER 多一字段 | 归档非法 → 找不到 app.manifest | 修正字段宽度与字段数 |
-| 10 | Rust `aead_open` 传入剥离了 tag 的密文（aes-gcm 需 `密文‖tag`） | 应用包解密恒失败 | 传完整密文 |
+| 10 | Rust `aead_open` 传入剥离了 tag 的密文（aes-gcm 需要 `密文‖tag`） | 应用包解密恒失败 | 传完整密文 |
 | 11 | 9p 挂载缓存导致客机读到陈旧产物（密钥/源码） | 产物与密钥代次错配，症状随机 | 构建前 `sync`+`drop_caches`，生成器自检+原子写入 |
 
 另有两项工程性修正：
-- **服务端把 `alive` 心跳当非法 stage 返回 400**，导致验证器误判失联并触发 L5 销毁（E1 首跑即暴露）→ 事件型 ack 单独处理。
-- **内核 printk 与串口关键标记交错**，使 `HYOS DESTROY[system-manifest]` 被拆断 → 验证器启动即把 printk 级别降到 1，保证审计日志可判定。
+
+- 服务端最初把 `alive` 心跳当非法 stage 返回 400，导致验证器误判失联并触发 L5 销毁（E1 首跑即暴露）→ 事件型 ack 单独处理。
+- 内核 printk 与串口关键标记交错，使 `HYOS DESTROY[system-manifest]` 被拆断 → 验证器启动即把 printk 级别降到 1，保证审计日志可判定。
 
 ---
 
-## 5. 与设计文档的偏差（需同步 v1.3）
+## 5. 与设计文档的偏差（已同步 v1.3）
 
 | 项 | 设计（v1.2） | 实测实现 | 原因与影响 |
 |---|---|---|---|
-| GRUB 取钥 | HTTP + 应用层信封加密在线取钥 | **离线槽解密**（GRUB 直接用白盒 WK0 解槽内 wrap） | BIOS 下 GRUB 无原生网卡驱动（`e1000.mod` 不存在），仅 PXE 栈可用。防回滚改由 **验证器 ack 阶段的服务端校验 + L5 兜底** 承担；GRUB 层仍保留签名/哈希/槽完整性校验。设计文档需明确该取舍 |
-| 应用执行强制 | IMA appraisal + eBPF LSM | **未实现**（本次仅验证到 supervisor 启动） | 属 M3 剩余项，需内核 IMA/LSM 配置与逐文件签名写入 |
-| 白盒化 | XOR 份额 + 微型 VM 重组 + 控制流平坦化 | 仅 **XOR 8 份额**（运行期重组） | VM 化/平坦化属加固项，不影响功能验证 |
+| GRUB 取钥 | HTTP + 应用层信封加密在线取钥 | **离线槽解密**（GRUB 直接用白盒 WK0 解槽内 wrap） | BIOS 下 GRUB 无原生网卡驱动（`e1000.mod` 不存在），仅 PXE 栈可用。防回滚改由验证器 ack 阶段的服务端校验 + L5 兜底承担；GRUB 层仍保留签名/哈希/槽完整性校验 |
+| 应用执行强制 | IMA appraisal + eBPF LSM | 未实现（本轮验证到 supervisor 启动） | 属 M3 剩余项，需要内核 IMA/LSM 配置与逐文件签名写入 |
+| 白盒化 | XOR 份额 + 微型 VM 重组 + 控制流平坦化 | 仅 XOR 8 份额（运行期重组） | VM 化/平坦化属加固项，不影响功能验证 |
 | prod 变体裁剪（无 SSH/shell） | CI 断言强制 | 未验证（当前 debug 变体含 busybox 依赖面） | M4 项 |
 | GitHub Actions + S3 上传 | 流水线 | 未接入（本地 Lima 内构建） | M5 项 |
 
@@ -104,10 +105,10 @@ limactl shell hyos-dev -- bash /mnt/vmiss/hyos-build/tests/e2e.sh
 ## 7. 后续工作
 
 1. **M3 收尾**：内核 IMA appraisal + eBPF LSM（执行前验签、拒绝即删）。
-2. **设计文档 v1.3**：写入“GRUB 离线取钥”的最终取舍与威胁模型影响；补充 `disk` 模块依赖、printk 静默等实现约束。
+2. **设计文档 v1.3**：写入"GRUB 离线取钥"的最终取舍与威胁模型影响；补充 disk 模块依赖、printk 静默等实现约束。
 3. **白盒化加固**：份额拆分 + 微型 VM 重组 + 控制流平坦化，并做一次 strings/IDA 抽查。
 4. **prod 变体**：裁剪 shell/SSH，加入 CI 断言（构建产物扫描即失败）。
-5. **CI**：GitHub Actions 构建 + 签名 + S3 上传 + D1 清单发布；dd 全自动部署演练。
+5. **CI**：GitHub Actions 构建 + 签名 + 对象存储上传 + D1 清单发布；dd 全自动部署演练。
 6. **性能回归**：在 TCG 之外用 KVM 硬件加速复测启动时间与 hysteria2 吞吐。
 
 ---
@@ -123,10 +124,10 @@ limactl shell hyos-dev -- bash /mnt/vmiss/hyos-build/tests/e2e.sh
 
 ### 8.1 运行时实现
 
-- hyinit 在 enforcing **之前**向 selinuxfs 单次写入加载单块策略，随后 `setenforce 1`；任何失败即 L3 销毁。
+- hyinit 在 enforcing 之前向 selinuxfs 单次写入加载单块策略，随后 `setenforce 1`；任何失败即 L3 销毁。
 - `/run` 挂载独立 tmpfs 作为应用运行区；运行期把应用标注为 `hyos_app_exec_t`、supervisor 标注为 `hyos_init_exec_t`（execute_no_trans，驻留 kernel_t）、配置为 `hyos_config_t`、应用私有临时区为 `hyos_tmp_t`。
 - 域转换：`kernel_t --(执行 hyos_app_exec_t)--> hyos_app_t`；`neverallow` 编译期断言块设备读写、危险能力、内核模块加载、同域 ptrace。
-- 部署密钥（读私有配置仓库的 Deploy Key）以 **8 组 XOR 份额**构建期嵌入 `verifier/src/genkeys.rs`（来自 CI Secret `HYOS_GIT_SSH_KEY_B64`，产物不入库），运行期重组写入 `/run/secrets/git_deploy_key`(0600)，`GITKEY_READY bytes=464` 实证。
+- 部署密钥（读私有配置仓库的 Deploy Key）以 8 组 XOR 份额构建期嵌入 `verifier/src/genkeys.rs`，运行期重组写入 `/run/secrets/git_deploy_key`(0600)，`GITKEY_READY bytes=464` 实证。
 
 ### 8.2 联调暴露并修复的缺陷（7 项）
 
@@ -134,11 +135,11 @@ limactl shell hyos-dev -- bash /mnt/vmiss/hyos-build/tests/e2e.sh
 |---|---|---|---|
 | 1 | `gen-hykeys.mjs` 多行 Rust 片段被写成普通双引号 JS 字符串 | SyntaxError，构建链第 2 步起全断 | 改为模板字面量 |
 | 2 | 部署密钥份额 Rust 类型写成 `[[u8; 58]; 8]`（字数），实际每份额为整长 464 字节 | hyinit 编译 E0308 | 类型改为 `[[u8; GIT_KEY_LEN]; 8]`，空密钥回退为 8 组空行 |
-| 3 | final-verify 重新生成密钥后**不重启 wrangler**，内存中 SRV_SK_PKCS8 仍是旧值 | 契约 20/21（仅 `server ed25519 sig` 挂） | 步骤 5 强制重启 Worker 再跑契约 → 21/21 |
-| 4 | **type_transition 目标类型未授权给父角色**（缺 `role system_r types hyos_app_t;`） | `type=1401 security_compute_sid invalid_context` → execve EACCES，且基座 dontaudit 掩蔽（permissive 下同样无 avc） | 模块内补 `role system_r/unconfined_r types hyos_app_t;` |
-| 5 | 应用域 fd/管道/`/dev/null` 继承链缺权限（supervisor `Stdio::null` 打开 `/dev/null`、探测输出管道、SIGCHLD、getsched） | enforcing 下 spawn EACCES（静默） | 补 `event_device_t`、`fd use`、`fifo_file write`、`sigchld`、`getsched` 显式 allow，并将应用 stdin 一并置空 |
-| 6 | tmpfs 挂载根 `/run` 为 `tmpfs_t`，应用无 search 权 → 进不了 `/run/hyos-tmp` | 探测 `TMP_WRITE=DENIED`（应 ALLOWED） | 补 `allow hyos_app_t tmpfs_t:dir { search getattr };` |
-| 7 | CI 镜像 job `apt-get install` 在 ubuntu-24.04 失败（`awscli` 无候选 + Recommends 依赖损坏链，`-qq` 掩蔽细节） | GitHub Actions 构建依赖步骤 exit 100 | 移除 `awscli`（runner 自带 v2）、改 `--no-install-recommends` 并加逐包定位输出 |
+| 3 | final-verify 重新生成密钥后未重启 wrangler，内存中 SRV_SK_PKCS8 仍是旧值 | 契约 20/21（仅 `server ed25519 sig` 挂） | 步骤 5 强制重启 Worker 再跑契约 → 21/21 |
+| 4 | type_transition 目标类型未授权给父角色（缺 `role system_r types hyos_app_t;`） | `type=1401 security_compute_sid invalid_context` → execve EACCES，且基座 dontaudit 掩蔽 | 模块内补 `role system_r/unconfined_r types hyos_app_t;` |
+| 5 | 应用域 fd/管道//dev/null 继承链缺权限 | enforcing 下 spawn EACCES（静默） | 补 `event_device_t`、`fd use`、`fifo_file write`、`sigchld`、`getsched` 显式 allow，应用 stdin 一并置空 |
+| 6 | tmpfs 挂载根 `/run` 为 `tmpfs_t`，应用无 search 权 | 探测 `TMP_WRITE=DENIED`（应 ALLOWED） | 补 `allow hyos_app_t tmpfs_t:dir { search getattr };` |
+| 7 | CI 镜像 job `apt-get install` 在 ubuntu-24.04 失败（`awscli` 无候选 + Recommends 依赖损坏链） | GitHub Actions 构建依赖步骤 exit 100 | 移除 `awscli`（runner 自带 v2）、改 `--no-install-recommends` 并加逐包定位输出 |
 
 ### 8.3 enforcing 模式验证证据（deploy-test.img，QEMU x86_64 TCG）
 
@@ -156,11 +157,10 @@ APP_OK sealed → ADVANCE OK seq=2 → HYOS E2E SUCCESS
 ```
 
 诊断手段：运行期回读文件 xattr 与 `/proc/mounts`；`type=1401 invalid_context` 事件是本轮定位角色授权缺失的关键线索。
-（已移除：`hy_enforce=0` permissive 后门——未认证 cmdline 开关可让策略退化为 permissive，与"宁毁勿漏"相悖。）
 
 ### 8.4 CI 状态
 
-- GitHub Actions（Steve5wutongyu6/HyOS）：单元测试 6/6 ✅、Worker 契约 21/21 ✅（Secrets 注入 + 本地 D1）；镜像 job 在依赖安装修复后执行内核/GRUB/用户态/SELinux/制品全量构建并上传 S3。
+GitHub Actions（Steve5wutongyu6/HyOS）：单元测试 6/6 ✅、Worker 契约 21/21 ✅（Secrets 注入 + 本地 D1）；镜像 job 在依赖安装修复后执行内核/GRUB/用户态/SELinux/制品全量构建并上传对象存储。
 
 ---
 
@@ -190,15 +190,9 @@ APP_OK sealed → ADVANCE OK seq=2 → HYOS E2E SUCCESS
 
 HID/USB/Wireless/Bluetooth/声音/DRM/Framebuffer/RTC/Watchdog/Thermal/I2C/SPI/MMC/GPIO/EFI/Microcode、IPv6、全部磁盘文件系统(ext4/btrfs/xfs/9p/fuse)、Modules/Kexec/Hibernation/Swap/SysVIPC/io_uring/seccomp/kallsyms/namespaces/cgroups/perf/audit 以外审计组件。
 
-### 9.3 过程中暴露的配置陷阱（对后续内核升级有参考价值）
+### 9.3 过程中沉淀的 kconfig 经验
 
-| 陷阱 | 说明 |
-|---|---|
-| SELinux 依赖链 | `SECURITY_SELINUX` depends on `AUDIT && SECURITY_NETWORK && NET && INET`，缺一被 olddefconfig 静默丢弃 → 必须断言校验 |
-| `NETFILTER_XT_TARGET_DNAT` 已并入 | 6.14 中 DNAT 目标由 `IP_NF_NAT` 自动 select 的 `XT_NAT` 提供，独立符号不存在 |
-| STACKPROTECTOR 父子项 | `STACKPROTECTOR_STRONG` 依赖 `STACKPROTECTOR`（默认 y 但 allnoconfig 全关） |
-| KASLR/IOAPIC | `RANDOMIZE_BASE` 依赖 `RELOCATABLE`；`X86_IO_APIC` 为 def_bool（显式写 `CONFIG_IO_APIC=y` 无效符号） |
-| devtmpfs 必显式 | allnoconfig 下 `DEVTMPFS(_MOUNT)` 默认关，缺了 hyinit 无法挂载 /dev → spawn 失败 |
+裁剪过程中踩过一批 kconfig 依赖链、select 链与 EXPERT 行为的坑（SELinux 依赖链、DNAT 符号并入、STACKPROTECTOR 父子项、KASLR/IOAPIC def_bool、devtmpfs 默认关、unset 行语法等），相关结论已单独整理成内核配置陷阱清单，作为后续内核升级的配置规范。
 
 ### 9.4 裁剪内核回归验证（本地 Lima，一次性提交前全绿）
 
@@ -211,39 +205,33 @@ HID/USB/Wireless/Bluetooth/声音/DRM/Framebuffer/RTC/Watchdog/Thermal/I2C/SPI/M
 | 项 | 内容 |
 |---|---|
 | 症状 | runner 上 `build-policy.sh` 180ms 内静默退出，exit code 2，零输出（内核/用户态均已构建成功） |
-| 根因 | `set -euo pipefail` 下 `POL=$(ls /etc/selinux/default/policy/policy.* 2>/dev/null | sort -V | tail -1)`——Ubuntu runner 无 SELinux 策略商店，`ls` 退出码 2，pipefail 经命令替换传播直接终止脚本（Debian VM 有基座商店故本地不可复现） |
-| 复现 | VM 中移走 `/etc/selinux/default` 后运行脚本 → 完全复现（exit 2 / 零输出） |
-| 修复 | ① `ls` 加 `|| true` 守卫 + 缺商店时显式报错退出 1；② CI apt 增加 `selinux-policy-default`（提供基座策略，runner 与 VM 同构）；③ `expand-check=0` 写入 semanage.conf（对齐 VM，加速 semodule 合并） |
+| 根因 | `set -euo pipefail` 下 `POL=$(ls /etc/selinux/default/policy/policy.* 2>/dev/null \| sort -V \| tail -1)`——Ubuntu runner 无 SELinux 策略商店，`ls` 退出码 2，pipefail 经命令替换传播直接终止脚本（Debian VM 有基座商店，本地不可复现） |
+| 复现 | VM 中移走 `/etc/selinux/default` 后运行脚本，完全复现（exit 2 / 零输出） |
+| 修复 | `ls` 加 `\|\| true` 守卫 + 缺商店时显式报错退出 1；CI apt 增加 `selinux-policy-default`；`expand-check=0` 写入 semanage.conf |
 | 验证 | 本地：有商店 `SELINUX_POLICY_OK bytes=1715650` ✓；无商店显式报错 exit 1 ✓；purge+重装包后 postinst 重建商店路径与 runner 全新装包一致 ✓ |
 
-### 9.6 二次收紧（EXPERT 陷阱与 select 链，2026-11-23 追加）
+### 9.6 二次收紧（EXPERT 与 select 链，2026-11-23 追加）
 
 | 项 | 内容 |
 |---|---|
 | 结果 | 816 项 =y（-35），bzImage **4.35 → 3.86 MB**（累计 13.4 → 3.86，3.5 倍） |
-| EXPERT 陷阱 | `EXPERT` 关闭时 VT/PPS 等符号**无提示**，`default y` 绕过 unset 静默生效（VT→select INPUT→touchscreen.o）→ 开 `CONFIG_EXPERT=y` 让 unset 行生效 |
-| select 链 ① | `WLAN`(default y) `select WIRELESS` → 需 unset **WLAN 断链头**（select 会覆盖显式 unset） |
-| select 链 ② | `PTP_1588_CLOCK` **default ETHERNET** 且 `select PPS` → 需 unset **PTP_1588_CLOCK**（e1000 不依赖它，无 select 反拉） |
-| 语法陷阱 | kconfig unset 行必须精确 `# CONFIG_X is not set`——行尾带注释文字则整行被当注释丢弃 |
-| 反向断言 | build-kernel.sh 增加 VT/INPUT/TOUCHSCREEN/PPS/WIRELESS/USB/HID/SOUND/DRM/IPV6 十项"不得为 y"校验 |
+| 手段 | 处理 EXPERT 未提示行为与两条 select 反拉链（WLAN→WIRELESS、PTP_1588_CLOCK→PPS），反向断言扩为十项"不得为 y"校验 |
 | 回归 | contract 21/21 ✓ enforcing 引导 E2E SUCCESS ✓ 探测矩阵 ✓ |
 
 ### 9.7 CI 制品分发切换 R2（2026-11-23）
 
-- S3（Bitiful cn-east-1）跨境上传慢 → 改 **Cloudflare R2**（同账号 API Token，`wrangler r2 object put`，无需 AWS 凭据；桶 `hyos-artifacts`，对象路径布局不变 `hyos/YYYYMMDD/deploy-<did>.img`）
-- roundtrip 实测 put/get/delete 全通；工作流同步移除 awscli 依赖与 S3_* Secrets 注入（GH Secrets 中的 S3_* 保留但不再使用）
+S3（Bitiful cn-east-1）跨境上传慢 → 改用 Cloudflare R2（同账号 API Token，`wrangler r2 object put`，无需 AWS 凭据；桶 `hyos-artifacts`，对象路径布局不变 `hyos/YYYYMMDD/deploy-<did>.img`）。roundtrip 实测 put/get/delete 全通；工作流同步移除 awscli 依赖与 S3_* Secrets 注入（GH Secrets 中的 S3_* 保留但不再使用）。
 
 ### 9.8 生产参数注入 + 一机一镜像（2026-11-23 追加）
 
 | 项 | 内容 |
 |---|---|
-| 目标 | DD 部署前必须解决的三个生产阻塞：网络参数硬编码（QEMU 值/无网关）、hyinit 无 DNS、一机一镜像 |
-| 注入通道 | `system.manifest`（**Ed25519 签名**）新增 `hy_net_ip/hy_net_mask/hy_net_gw/hy_srv/hy_srv_host` 字段 —— 篡改即验签失败触发销毁 |
-| hyinit 改造 | ① 网络参数从签名清单读取（缺省回落 QEMU 联调值）；② 新增 `route_add_default_via`（netlink RTM_NEWROUTE + RTNH_F_ONLINK + RTA_OIF，ifindex 取自 sysfs）；③ HTTP Host 头可配（`hy_srv=IP:PORT@域名`，CF 边缘 IP 直连按 Host 路由，hyinit 无 DNS） |
+| 目标 | 解决 DD 部署前的三个生产阻塞：网络参数硬编码（QEMU 值/无网关）、hyinit 无 DNS、一机一镜像 |
+| 注入通道 | `system.manifest`（Ed25519 签名）新增 `hy_net_ip/hy_net_mask/hy_net_gw/hy_srv/hy_srv_host` 字段——清单被篡改时验签失败触发销毁 |
+| hyinit 改造 | 网络参数从签名清单读取（缺省回落 QEMU 联调值）；新增 `route_add_default_via`（netlink RTM_NEWROUTE + RTNH_F_ONLINK + RTA_OIF，ifindex 取自 sysfs）；HTTP Host 头可配（`hy_srv=IP:PORT@域名`，CF 边缘 IP 直连按 Host 路由，hyinit 无 DNS） |
 | ioctl 路线废弃原因 | SIOCADDRT 在裁剪内核上 fib_check_nh_v4_gw 网关 fib_lookup 失败（ENETUNREACH/errno 101，非 SELinux——宿主内核同序列复现成功），netlink ONLINK 分支无此依赖 |
-| 一机一镜像 | `scripts/build-for-target.sh --name X --net-ip/--net-mask/--net-gw/--srv [--test-mode]`：全新设备密钥 → 注册生产 → 用户态/GRUB 重建（**VK/WK0 必须绑定新密钥**，跳过即销毁）→ 清单注入 → initrd/镜像 → R2 `hyos/targets/<名称>/` |
+| 一机一镜像 | `scripts/build-for-target.sh --name X --net-ip/--net-mask/--net-gw/--srv [--test-mode]`：全新设备密钥 → 注册生产 → 用户态/GRUB 重建（VK/WK0 绑定新密钥）→ 清单注入 → initrd/镜像 → R2 `hyos/targets/<名称>/` |
 | 验证 | 注入镜像 QEMU 引导：`NET UP 10.0.2.15/24` + `NET GW via 10.0.2.2 (netlink onlink)` + APP_OK sealed + **E2E SUCCESS**；默认路径回归：契约 21/21 + E2E SUCCESS |
-| 部署约束 | 目标机必须 BIOS 引导；一机一镜像（共享镜像第二台触发 epoch 回滚销毁）；hy_srv 用 CF 边缘 IP + Host 头（明文 HTTP 传输有中间人风险，TLS 属后续 M 项） |
 
 ### 9.9 TLS 化（2026-11-23 追加）
 
@@ -252,12 +240,11 @@ HID/USB/Wireless/Bluetooth/声音/DRM/Framebuffer/RTC/Watchdog/Thermal/I2C/SPI/M
 | 动机 | 明文 HTTP 下中间人可伪造 403 拒绝 ack → 强制销毁（on-path DoS）；TLS 服务器证书校验彻底关闭该攻击面 |
 | 方案 | rustls 0.23（ring 后端，静态链接）+ webpki-roots 内嵌公共 CA；cargo feature `tls` 可选——本地 QEMU 联调走明文 HTTP（本地 worker 无 TLS），生产构建启用 |
 | 时间依赖 | TLS 证书校验需要真实时间 → 内核启用 RTC_CLASS/HCTOSYS/RTC_DRV_CMOS（CMOS 硬件时钟 → 系统时钟），bzImage 3.86→3.88MB |
-| hyinit 改造 | TLS_MODE 静态开关（清单 hy_tls=1）→ http_post 双模式（TCP/rustls）；SNI 与 HTTP Host 同取 hy_srv_host；**supervisor 为独立进程，TLS 标志经 HY_TLS 环境继承**（曾因静态变量不共享导致 supervisor 明文回退被 CF 拒绝销毁） |
-| 失败语义 | hy_tls=1 但二进制不支持 → 拒绝明文回退 → 按服务器不可达销毁（fail-closed，符合宁毁勿漏） |
+| hyinit 改造 | TLS_MODE 静态开关（清单 hy_tls=1）→ http_post 双模式（TCP/rustls）；SNI 与 HTTP Host 同取 hy_srv_host；supervisor 为独立进程，TLS 标志经 HY_TLS 环境继承（曾因静态变量不共享导致 supervisor 明文回退被 CF 拒绝销毁） |
+| 失败语义 | hy_tls=1 但二进制不支持 → 拒绝明文回退 → 按服务器不可达销毁（fail-closed） |
 | 体积 | hyinit 静态二进制 1.6→2.84MB（+1.2MB TLS 栈） |
 | 生产级验证 | QEMU 客机 → SLIRP NAT → 公网 → CF 边缘 IP:443 → TLS（SNI=hyos.nanachi.cloud，webpki 根校验，真实时间）→ grub_ok/sys_ok/app_ok/alive 全链路加密 ack → **E2E SUCCESS（Q_EXIT=0）** |
 | 回归 | 明文路径 e2e 9/9 ALL PASS（TLS 改造无副作用）；CI 三 job 全绿 |
-| 注意 | CF 边缘 IP 烘焙进镜像：IP 若退役设备将不可达 → 按设计销毁；运维需定期核验烘焙 IP；CMOS 电池失效同样触发 fail-closed |
 
 ### 9.10 M5：真 hysteria2 应用包（2026-11-24 追加）
 
@@ -268,16 +255,10 @@ HID/USB/Wireless/Bluetooth/声音/DRM/Framebuffer/RTC/Watchdog/Thermal/I2C/SPI/M
 | 配置管线 | HysteriaConfig 私有仓库（SOPS+age）→ build-for-target 解密渲染（obfs PSK/auth 机密注入模板）→ 打入 p2 加密应用包（安全边界=DEK2） |
 | 证书 | 沿用现役 ACME 证书（oa.nanachi.cloud，从实测备份提取打包）；到期续期属后续项 |
 | verifier 改造 | lo 配置（hyauth bind 依赖）+ /etc/resolv.conf（Go DNS）+ hysteria 模式 spawn（hysteria server -c config + hyauth 先起）+ 逐文件哈希校验 + netlink 路由 |
-| SELinux | hyauth 端口标注（portcon 模块语言不支持 → build-policy.sh 经 **semanage port** 注入）+ hysteria UDP 443 类型 + name_connect + tty 诊断写 |
+| SELinux | hyauth 端口标注（portcon 模块语言不支持 → build-policy.sh 经 semanage port 注入）+ hysteria UDP 443 类型 + name_connect + tty 诊断写 |
 | 传输硬化 | ack 全路径 connect_timeout(10s)/read 30s（网络抖动快速失败进销毁路径，不再挂死） |
 | 端到端验证 | QEMU(SLIRP) → 客户端(obfs+TLS+auth) → **HyOS 内 hysteria2** → SOCKS5 代理 → **www.cloudflare.com HTTP 200**；hyauth ok:true；E2E SUCCESS |
 | DD 就绪度 | 生产参数镜像构建管线全通；待真机 DD（用户确认时机） |
-
-调试要点（对后续同类问题有价值）：
-1. **9p 缓存陷阱复发**：宿主机改源码后客机构建读到陈旧产物 → build-for-target 开头 sync+drop_caches 固化
-2. **test-mode 关机窗口**：E2E SUCCESS 后 2s 断电 → 客户端测试必须用生产 cfg（VM 常驻）
-3. **wrangler/wrangler 日志/串口文件 root 所有权**：sudo rm
-4. **boot 失败后的再引导**：服务端状态机拒绝重复 grub_ok → 必须 OWNER_TOKEN rearm 后再 boot（防回滚设计）
 
 ### 9.11 证书自动续期（ACME DNS-01，2026-11-25 追加）
 
@@ -285,9 +266,8 @@ HID/USB/Wireless/Bluetooth/声音/DRM/Framebuffer/RTC/Watchdog/Thermal/I2C/SPI/M
 |---|---|
 | 动机 | 现役 ACME 证书有效期至 2027-02，到期未续 → hysteria 无法启动 → fail-closed；此前依赖人工续期 |
 | 架构 | 设备内置 **ACME v2 (RFC 8555) DNS-01 客户端**（verifier/src/acme.rs，rustls+ring）：LE 账户创建（ES256 JWS）→ newOrder → DNS-01 → finalize(CSR DER 手工构造) → 证书下载 |
-| 安全模型 | **设备永不持有 Cloudflare 凭据**：DNS-01 挑战经密钥服务 /v1/acme-dns 代理（设备 DK 签名鉴权，同 ack 信任模型）；域名白名单（ACME_DOMAIN Secret）；revoke/quarantine 即拒绝 |
+| 安全模型 | 设备永不持有 Cloudflare 凭据：DNS-01 挑战经密钥服务 /v1/acme-dns 代理（设备 DK 签名鉴权，同 ack 信任模型）；域名白名单（ACME_DOMAIN Secret）；revoke/quarantine 即拒绝 |
 | 证书密钥 | 每次签发随机新生成 P-256（≠ 账户密钥，规避 LE duplicate 限流）；CSR 含 CN+SAN；PKCS#8 PEM 输出 |
 | 无持久化 | 账户密钥可确定性重建/随机重建；证书与私钥仅存 tmpfs（0600），随下次引导轮换 |
 | 签发失败 | 3 次重试后回落应用包内置证书（到期前人工处理）——引导不中断 |
 | staging 验证 | **LE staging 全链路实测通过**：账户 OK → DNS-01 挑战 valid（Worker 代理写 TXT → LE 多视角验证）→ finalize → 证书下载 → hysteria 用新证书启动（server up :443） |
-| 调试要点 | ① LE 接口返回格式化 JSON（冒号带空格）→ JSON 提取需空白容忍；② 状态轮询匹配同理；③ PKCS#9 extensionRequest 属性值 = SET{Extensions-SEQ}（Go/OpenSSL 事实标准，无 OCTET 包装）；④ PEM 私钥必须标准 base64（非 url）；⑤ CSR 公钥 ≠ 账户公钥 |
