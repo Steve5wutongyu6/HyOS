@@ -1,6 +1,6 @@
 # HyOS DD 部署手册（BIOS 云主机）
 
-本手册描述把一台 BIOS 引导的云主机部署为 HyOS 设备的完整流程：为目标机器构建专属镜像，把镜像写入磁盘，之后设备会自动完成首次启动并开始对外服务。
+本手册描述把一台 BIOS 引导的云主机部署为 HyOS 设备的完整流程
 
 ## 部署方式概述
 
@@ -39,8 +39,6 @@ r2=hyos-artifacts/hyos/targets/vmiss-gz-01/deploy-devXXXXXXXXXX.img
 
 ## 第二步：写入目标机
 
-VPS 救援模式或官方 DD 脚本都可以，核心是一条写入命令。
-
 方式 A：本地拉取镜像后传到目标机写盘，需要本地有 node 环境：
 
 ```bash
@@ -70,7 +68,7 @@ SELINUX_APP_DOMAIN=system_u:system_r:hyos_app_t:s0
 APP_OK sealed → ADVANCE OK seq=2
 ```
 
-这些标记全部按顺序出现，部署就成功了，整个过程大约 90 秒。Hysteria2 客户端随即可以连入。
+这些标记全部按顺序出现，部署就成功了。
 
 ## 日常运维
 
